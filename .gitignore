@@ -1,0 +1,5 @@
+audio_test
+*.o
+*.obj
+*.exe
+*.wav

@@ -1,29 +1,4 @@
-#include "kiss_fft.h"
-#include <cstdint>
-#include <iostream>
-#include <vector>
-
-class DSPCore {
-    private:
-
-    kiss_fft_cfg forward;
-    kiss_fft_cfg inverse;
-
-    uint32_t n_fft; //frame size
-    uint32_t hop_length;
-
-    std::vector<float> window; //hann window
-
-    void create_hann_window();
-
-    public:
-
-    DSPCore(uint32_t n_fft, uint32_t hop_length);
-    ~DSPCore();
-
-    std::vector<kiss_fft_cpx> stft(const std::vector<float>& frame);
-    std::vector<float> istft(const std::vector<kiss_fft_cpx>& frame);
-};
+#include "DSPCore.h"
 
 DSPCore::DSPCore(uint32_t n_fft, uint32_t hop_length)
 :n_fft(n_fft), hop_length(hop_length) {
@@ -91,5 +66,60 @@ std::vector<float> DSPCore::istft(const std::vector<kiss_fft_cpx>& frame) {
 
     return result;
 
+
+}
+
+std::vector<float> DSPCore::pad_audio(const std::vector<float>& audio) {
+
+    uint32_t pad_length = n_fft / 2;
+
+    std::vector<float> padded(audio.size() + 2 * pad_length);
+
+    for (uint32_t i = 0; i < pad_length; i++) {
+        padded[i] = audio[pad_length - 1 - i];
+    }
+
+    for (int i = 0; i < audio.size(); i++) {
+        padded[pad_length + i] = audio[i];
+    }
+
+    for (int i = 0; i < pad_length; i++) {
+        padded[pad_length + audio.size() + i] = audio[audio.size() - 1 - i];
+    }
+
+    return padded;
+}
+
+std::vector<float> DSPCore::process(const std::vector<float>& audio) {
+    std::vector<float> padded = pad_audio(audio);
+
+    std::vector<float> reconstruction(padded.size(), 0.0f);
+
+    for (uint32_t offset = 0; offset + n_fft <= padded.size(); offset += hop_length ) {
+
+        std::vector<float> frame(n_fft);
+        for (uint32_t i = 0; i < n_fft; i++) {
+            frame[i] = padded[offset + i];
+        }
+
+       std::vector<kiss_fft_cpx> freq_bins = stft(frame);
+
+       std::vector<float> processed_frame = istft(freq_bins);
+
+        for (uint32_t i = 0; i < n_fft; i++) {
+            reconstruction[offset + i] += processed_frame[i];
+        }
+
+    }
+
+    uint32_t pad_length = n_fft / 2;
+
+    std::vector<float> result(audio.size());
+
+    for (uint32_t i = 0; i < audio.size(); i++) {
+        result[i] = reconstruction[pad_length + i];
+    }
+
+    return result;
 
 }
