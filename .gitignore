@@ -1,5 +1,11 @@
 audio_test
+model_test
+test_onnx
+UVR_MDXNET_KARA_2.onnx:Zone.Identifier
+*.onnx
 *.o
 *.obj
 *.exe
 *.wav
+.vscode/
+onnxruntime/
