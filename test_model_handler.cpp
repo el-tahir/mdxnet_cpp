@@ -13,7 +13,6 @@ int main() {
 
         handler.load_model(model_path);
 
-        // MDX-NET expects [1, 2, Dim, Dim]
         // dummy data
         std::vector<int64_t> input_shape = {1, 4, 2048, 256};
 

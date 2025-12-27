@@ -1,132 +1,152 @@
 #include <iostream>
 #include <vector>
-#include <fstream>
-#include <cstdint>
+#include <utility>
+#include <algorithm>
 #include "DSPCore.h"
+#include "kiss_fft.h"
+#include "ModelHandler.h"
+#include "WAVHeader.h"
+#include "utils.cpp"
 
 
-#pragma pack(push, 1)
+void run_seperation(const std::string& input_path, const std::string& output_path, const std::string& model_path) {
+    // setup
+    std::cout << "loading " << input_path << "..." << std::endl;
+    std::vector<float> stereo_buffer;
+    WAVHeader header = read_wav(input_path, stereo_buffer);
+std::cout << "DEBUG: Stereo Buffer Size: " << stereo_buffer.size() << std::endl; // <--- Add this
 
-struct WAVHeader {
-    // RIFF chunk
-    char chunk_id[4]; // "RIFF"
-    uint32_t chunk_size; //file size - 8
-    char format[4]; // "WAVE"
-    // fmt sub-chunk
-    char subchunk1_id[4]; // "fmt "
-    uint32_t subchunk1_size; // 16 for PCM
-    uint16_t audio_format; // 1 for PCM, 3 for float
-    uint16_t num_channels; // 1 for mono, 2 for stereo
-    uint32_t sample_rate; // e.g. 44100
-    uint32_t byte_rate; // sample_rate * num_channels * bits_per_sample/8
-    uint16_t block_align; // num_channels * bits_per_sample/8
-    uint16_t bits_per_sample; // 16 or 32
-    // data sub_chunk
-    char subchunk2_id[4]; // "data"
-    uint32_t subchunk2_size; // num_samples * num_channels * bits_per_sample/8
-};
-#pragma pack(pop)
+    // split channels
 
-WAVHeader read_wav(const std::string& full_path, std::vector<float>& stereo_buffer) {
-    WAVHeader header;
-    std::ifstream wav_file(full_path, std::ios::binary);
-    if (!wav_file) throw std::runtime_error("failed to open file: " + full_path);
-    wav_file.read(reinterpret_cast<char*> (&header), sizeof(WAVHeader));
-    if (header.sample_rate != 44100) throw std::runtime_error("unsupported sample rate: " + std::to_string(header.sample_rate) + "expected 44100");
-    if (header.audio_format != 1 && header.audio_format != 3 ) throw std::runtime_error("unsupported audio format: " + std::to_string(header.audio_format) + " (expected PCM or flaot)");
-    uint32_t num_samples = header.subchunk2_size /  (header.bits_per_sample / 8 );
-    std::vector<float> buffer(num_samples);
-    if (header.audio_format == 1) {
-        std::vector<int16_t> temp_buffer(num_samples);
-        wav_file.read(reinterpret_cast<char*> (temp_buffer.data()), header.subchunk2_size);
-        for (size_t i = 0; i < num_samples; i++) {
-            buffer[i] = temp_buffer[i] / 32768.0f;
+    std::vector<float> left_audio, right_audio;
+    for (size_t i = 0; i < stereo_buffer.size(); i += 2) {
+        left_audio.push_back(stereo_buffer[i]);
+        right_audio.push_back(stereo_buffer[i + 1]);
+    }
+
+    uint32_t n_fft = 4096; uint32_t hop_length = 1024;
+
+    DSPCore dsp(n_fft, hop_length);
+    ModelHandler model;
+    model.load_model(model_path);
+
+    // analysis
+
+    std::vector<float> left_padded = dsp.pad_audio(left_audio);
+    std::vector<float> right_padded = dsp.pad_audio(right_audio);
+
+
+    std::vector<std::vector<kiss_fft_cpx>> all_left_frames, all_right_frames;
+
+    
+
+    for (size_t offset = 0; offset + n_fft <= left_padded.size(); offset += hop_length) {
+        std::vector<float> left_frame(n_fft), right_frame(n_fft);
+
+        for (uint32_t i = 0; i < n_fft; i++) {
+            left_frame[i] = left_padded[offset + i];
+            right_frame[i] = right_padded[offset + i];
         }
-    } else if (header.audio_format == 3) {
-        // just read directly
-        wav_file.read(reinterpret_cast<char*>(buffer.data()), header.subchunk2_size);
+
+        all_left_frames.push_back(dsp.stft(left_frame));
+        all_right_frames.push_back(dsp.stft(right_frame));
+
     }
-    if (header.num_channels == 1) {
-        stereo_buffer.resize(num_samples * 2);
-        for (size_t i = 0; i < num_samples; i++) {
-            stereo_buffer[i * 2] = buffer[i];
-            stereo_buffer[i * 2 + 1] = buffer[i];
+    
+    std::vector<std::vector<kiss_fft_cpx>> processed_left, processed_right;
+
+    int batch_size = 256;
+    int num_frames = all_left_frames.size();
+
+    std::cout << "runnning inference on " << num_frames << " frames..." << std::endl;
+
+    std::vector<int64_t> input_shape = {1, 4, 2048, 256};
+
+    for (int i = 0; i < num_frames; i += batch_size) {
+
+        std::vector<std::vector<kiss_fft_cpx>> left_batch(batch_size, std::vector<kiss_fft_cpx>(n_fft)), right_batch(batch_size, std::vector<kiss_fft_cpx>(n_fft));
+
+        int frames_remaining = num_frames - i;
+        int actual_batch = std::min(batch_size, frames_remaining);
+
+        for (int j = 0; j < actual_batch; j++) {
+            left_batch[j] = all_left_frames[i + j];
+            right_batch[j] = all_right_frames[i + j];
         }
+
+        std::vector<float> tensor = stft_to_tensor(left_batch, right_batch);
+
+        std::vector<float> processed = model.run_inference(tensor, input_shape);
+
+        auto output = tensor_to_stft(processed);
+
+        for (int k = 0; k < actual_batch; k++) {
+            processed_left.push_back(output.first[k]);
+            processed_right.push_back(output.second[k]);
+        }
+
     }
-    else {
-        stereo_buffer = buffer;
+
+    std::vector<float> left_reconstructed(left_padded.size(), 0.0f);
+    std::vector<float> right_reconstructed(right_padded.size(), 0.0f);
+
+    uint32_t pad_length = n_fft / 2;
+    for (size_t frame_idx = 0; frame_idx < processed_left.size(); frame_idx++) {
+        std::vector<float> left_time = dsp.istft(processed_left[frame_idx]);
+        std::vector<float> right_time = dsp.istft(processed_right[frame_idx]);
+
+        size_t offset = frame_idx * hop_length;
+
+        for (uint32_t n = 0; n < n_fft; n++) {
+            left_reconstructed[offset + n] += left_time[n];
+            right_reconstructed[offset + n] += right_time[n];
+        }
+
     }
-    header.num_channels = 2;
-    header.bits_per_sample = 32;
-    header.audio_format = 3;
-    header.byte_rate = header.sample_rate * header.num_channels * (header.bits_per_sample / 8);
-    header.subchunk2_size = stereo_buffer.size() * sizeof(float);
-    header.block_align = header.num_channels * (header.bits_per_sample / 8);
-    header.chunk_size = 36 + header.subchunk2_size;
-    return header;
+
+    std::vector<float> left_final(left_audio.size());
+    std::vector<float> right_final(right_audio.size());
+
+    for (size_t i = 0; i < left_audio.size(); i++) {
+        left_final[i] = left_reconstructed[pad_length + i];
+        right_final[i] = right_reconstructed[pad_length + i];
+    }
+
+    std::vector<float> stereo_output;
+    stereo_output.reserve(left_final.size() * 2);
+
+    for (size_t i = 0; i < left_final.size(); i++) {
+        stereo_output.push_back(left_final[i]);
+        stereo_output.push_back(right_final[i]);
+    }
+
+    // normalization because hann window sums up to 2.0 (because of 75% overlap), we want it 1.0;
+
+    for (float& sample : stereo_output) {
+        sample *= 0.5f;
+    }
+
+
+    write_wav(header, output_path, stereo_output);
 }
 
-void write_wav(WAVHeader& header, const std::string& filename, std::vector<float>& buffer) {
-    std::ofstream output(filename, std::ios::binary);
-    if (!output) throw std::runtime_error("could not open file for saving");
-    output.write(reinterpret_cast<char*>(&header), sizeof(header));
-    output.write(reinterpret_cast<char*> (buffer.data()), buffer.size() * sizeof(float));
-}
+int main(int argc, char* argv[]) {
+    if (argc < 3) {
+        std::cout << "usage: ./seperator <input.wav> <output.wav>" << std::endl;
+        return 1;
+    }
 
-int main() {
-    std::string input_file = "piano.wav";
-    std::string output_file = "test.wav";
-
-    uint32_t n_fft = 4096;
-    uint32_t hop_length = 2048;
+    std::string input_file = argv[1];
+    std::string output_file = argv[2];
+    std::string model_file = "UVR_MDXNET_KARA_2.onnx";
 
     try {
-        std::vector<float> stereo_buffer;
-
-        WAVHeader header = read_wav(input_file, stereo_buffer);
-
-        std::cout << "loaded " << input_file << ": " 
-                  << header.sample_rate << "Hz, "
-                  << header.num_channels << " channels, "
-                  << stereo_buffer.size() << " samples." << std::endl;
-
-        DSPCore dsp(n_fft, hop_length);
-
-        std::vector<float> left_channel, right_channel;
-        left_channel.reserve(stereo_buffer.size() / 2);
-        right_channel.reserve(stereo_buffer.size() / 2);
-
-        for (size_t i = 0; i < stereo_buffer.size(); i += 2) {
-            left_channel.push_back(stereo_buffer[i]);
-            right_channel.push_back(stereo_buffer[i + 1]);
-        }
-
-        std::cout << "processing left channel..." << std::endl;
-        std::vector<float> left_out = dsp.process(left_channel);
-        std::cout << "processing right channel..." << std::endl;
-        std::vector<float> right_out = dsp.process(right_channel);
-
-        std::vector<float> final_output;
-        final_output.reserve(left_out.size() * 2);
-
-        size_t min_size = std::min(left_out.size(), right_out.size());
-
-        for (size_t i = 0; i < min_size; i++) {
-            final_output.push_back(left_out[i]);
-            final_output.push_back(right_out[i]);
-        }
-
-        write_wav(header, output_file, final_output);
-        std::cout << "success! saved to " << output_file << std::endl;
-        
-
+        run_seperation(input_file, output_file, model_file);
+        std::cout << "done! saved to " << output_file << std::endl;
     } catch (const std::exception& e) {
         std::cerr << "error: " << e.what() << std::endl;
         return 1;
     }
-
-
-
 
     return 0;
 }

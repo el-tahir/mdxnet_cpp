@@ -1,0 +1,2 @@
+to compile test_model_handler.cpp
+g++ -O2 -I./onnxruntime/include -L./onnxruntime/lib -Wl,-rpath,./onnxruntime/lib -o model_test test_model_handler.cpp ModelHandler.cpp -lonnxruntime

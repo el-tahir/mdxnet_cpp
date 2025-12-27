@@ -1,3 +1,4 @@
+#pragma once
 #include "kiss_fft.h"
 #include <cstdint>
 #include <iostream>
