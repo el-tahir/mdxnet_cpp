@@ -20,8 +20,9 @@ DSPCore::~DSPCore() {
 void DSPCore::create_hann_window() {
     window.resize(n_fft);
 
+    // use periodic hann window
     for (uint32_t n = 0; n < n_fft; n++) {
-        window[n] = 0.5f * (1.0f - std::cos(2.0f * M_PI * n / (n_fft - 1)));
+        window[n] = 0.5f * (1.0f - std::cos(2.0f * M_PI * n / n_fft));
     }
 }
 
@@ -60,8 +61,9 @@ std::vector<float> DSPCore::istft(const std::vector<kiss_fft_cpx>& frame) {
 
     std::vector<float> result(n_fft);
 
+    // apply window and normalize (window is applied in istft for overlap-add reconstruction)
     for (uint32_t i = 0; i < n_fft; i++) {
-        result[i] = (output[i].r / n_fft);
+        result[i] = window[i] * (output[i].r / n_fft);
     }
 
     return result;

@@ -38,7 +38,6 @@ std::cout << "DEBUG: Stereo Buffer Size: " << stereo_buffer.size() << std::endl;
 
     std::vector<std::vector<kiss_fft_cpx>> all_left_frames, all_right_frames;
 
-    
 
     for (size_t offset = 0; offset + n_fft <= left_padded.size(); offset += hop_length) {
         std::vector<float> left_frame(n_fft), right_frame(n_fft);
@@ -120,10 +119,14 @@ std::cout << "DEBUG: Stereo Buffer Size: " << stereo_buffer.size() << std::endl;
         stereo_output.push_back(right_final[i]);
     }
 
-    // normalization because hann window sums up to 2.0 (because of 75% overlap), we want it 1.0;
+    // normalization for COLA (Constant Overlap-Add):
+    // with window applied in both stft and istft (symmetric), we have w^2(n) at each position.
+    // For 75% overlap (hop_length = n_fft/4) with periodic hann window:
+    // sum of squared windows at each position = 1.5
+    // So we divide by 1.5 to normalize
 
     for (float& sample : stereo_output) {
-        sample *= 0.5f;
+        sample /= 1.5f;
     }
 
 
