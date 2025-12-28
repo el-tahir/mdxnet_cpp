@@ -9,6 +9,20 @@ A C++ implementation that runs MDX-Net ONNX models (right now it supports `UVR_M
 - **ONNX Runtime Inference** – Runs MDX-Net models for vocal separation
 - **WAV File Support** – Reads and writes stereo WAV files
 
+## Demo
+
+### Before & After Audio Separation
+
+See MDXNet C++ in action! The videos below demonstrate vocal separation on sample audio tracks.
+
+**Original (with vocals):**
+
+
+
+**After Processing (instrumental only):**
+
+
+
 ## Requirements
 
 - C++ compiler with C++11 support
@@ -69,6 +83,21 @@ g++ -O2 -I./onnxruntime/include -L./onnxruntime/lib \
 -o separator main.cpp DSPCore.cpp ModelHandler.cpp kiss_fft.c \
 -lonnxruntime
 ```
+
+## Preprocessing WAV Files
+
+The WAV parser requires a canonical WAV header format. Before using the tool, preprocess your input file with ffmpeg to strip metadata and ensure compatibility:
+
+```bash
+ffmpeg -i input.wav -map_metadata -1 -fflags +bitexact -acodec pcm_s16le -ar 44100 -ac 2 output.wav
+```
+
+This command:
+- Strips all metadata (`-map_metadata -1`)
+- Ensures bit-exact output (`-fflags +bitexact`)
+- Converts to 16-bit PCM (`-acodec pcm_s16le`)
+- Sets sample rate to 44.1kHz (`-ar 44100`)
+- Ensures stereo output (`-ac 2`)
 
 ## Usage
 

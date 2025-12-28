@@ -14,7 +14,7 @@ void run_seperation(const std::string& input_path, const std::string& output_pat
     std::cout << "loading " << input_path << "..." << std::endl;
     std::vector<float> stereo_buffer;
     WAVHeader header = read_wav(input_path, stereo_buffer);
-std::cout << "DEBUG: Stereo Buffer Size: " << stereo_buffer.size() << std::endl; // <--- Add this
+std::cout << "DEBUG: Stereo Buffer Size: " << stereo_buffer.size() << std::endl;
 
     // split channels
 
