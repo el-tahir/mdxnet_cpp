@@ -1,7 +1,7 @@
 audio_test
 model_test
 test_onnx
-UVR_MDXNET_KARA_2.onnx:Zone.Identifier
+*.Identifier
 *.onnx
 *.o
 *.obj
