@@ -8,6 +8,41 @@
 #include "WAVHeader.h"
 #include "utils.cpp"
 
+#include <cmath>
+
+
+void apply_noise_gate(std::vector<float>& stereo_audio, float threshold_db = -60.0f, int window_size = 2048) {
+
+    if (stereo_audio.size() < 2) return;
+
+    float threshold = std::pow(10.0f, threshold_db / 20.0f);
+
+    for (size_t i = 0; i < stereo_audio.size(); i += 2) {
+        float sum_sq = 0.0f;
+        int count = 0;
+
+        int start = std::max(0, (int)i - window_size);
+        int end = std::min((int)stereo_audio.size(), (int)i + window_size);
+
+        for (int j = start; j < end; j++) {
+            sum_sq += stereo_audio[j] * stereo_audio[j];
+            count++;
+        }
+
+        float rms = std::sqrt(sum_sq / count);
+
+        if (rms < threshold) {
+            stereo_audio[i] = 0.0f;
+            if (i + 1 < stereo_audio.size()) {
+                stereo_audio[i + 1] = 0.0f;
+            }
+        }
+
+
+    }
+
+
+}
 
 void run_seperation(const std::string& input_path, const std::string& output_path, const std::string& model_path) {
     // setup
@@ -128,6 +163,8 @@ std::cout << "DEBUG: Stereo Buffer Size: " << stereo_buffer.size() << std::endl;
     for (float& sample : stereo_output) {
         sample /= 1.5f;
     }
+
+    apply_noise_gate(stereo_output, -40.0f, 2048);
 
 
     write_wav(header, output_path, stereo_output);
