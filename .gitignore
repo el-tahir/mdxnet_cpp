@@ -1,11 +1,30 @@
+# Build output
+build/
+separator
+
+# Test binaries
 audio_test
 model_test
 test_onnx
-*.Identifier
-*.onnx
+
+# Object files
 *.o
 *.obj
+
+# Windows executables
 *.exe
+
+# Audio files (large, don't commit)
+samples/
 *.wav
+
+# Models (large, download separately)
+models/
+*.onnx
+
+# IDE and editor files
 .vscode/
+*.Identifier
+
+# External dependencies
 onnxruntime/

@@ -59,7 +59,7 @@ std::cout << "DEBUG: Stereo Buffer Size: " << stereo_buffer.size() << std::endl;
         right_audio.push_back(stereo_buffer[i + 1]);
     }
 
-    uint32_t n_fft = 4096; uint32_t hop_length = 1024;
+    uint32_t n_fft = 4096; uint32_t hop_length = 1024;  // 75% overlap
 
     DSPCore dsp(n_fft, hop_length);
     ModelHandler model;
@@ -178,7 +178,7 @@ int main(int argc, char* argv[]) {
 
     std::string input_file = argv[1];
     std::string output_file = argv[2];
-    std::string model_file = "UVR_MDXNET_KARA_2.onnx";
+    std::string model_file = "models/UVR_MDXNET_KARA_2.onnx";
 
     try {
         run_seperation(input_file, output_file, model_file);
