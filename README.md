@@ -13,8 +13,6 @@ A C++ implementation that runs MDX-Net ONNX models (right now it supports `UVR_M
 
 ### Before & After Audio Separation
 
-See MDXNet C++ in action! The videos below demonstrate vocal separation on sample audio tracks.
-
 **Original (with vocals):**
 
 
@@ -25,90 +23,44 @@ See MDXNet C++ in action! The videos below demonstrate vocal separation on sampl
 
 ## Requirements
 
-- C++ compiler with C++11 support
-- ONNX Runtime library
-- An MDX-Net ONNX model (e.g., `UVR_MDXNET_KARA_2.onnx`)
-
-## Installing ONNX Runtime
-
-1. Download the ONNX Runtime release for your platform from the [official releases page](https://github.com/microsoft/onnxruntime/releases).
-
-2. Extract and place it in the project directory:
-
-```bash
-# Example for Linux x64
-wget https://github.com/microsoft/onnxruntime/releases/download/v1.16.3/onnxruntime-linux-x64-1.16.3.tgz
-tar -xzf onnxruntime-linux-x64-1.16.3.tgz
-mv onnxruntime-linux-x64-1.16.3 onnxruntime
-```
-
-3. Your directory structure should look like:
-
-```
-mdxnet_cpp/
-├── onnxruntime/
-│   ├── include/
-│   └── lib/
-├── main.cpp
-└── ...
-```
-
-## Downloading the Model
-
-  
-
-Download the `UVR_MDXNET_KARA_2.onnx` model from Hugging Face:
-
-  
-
-```bash
-
-wget  https://huggingface.co/AI4future/RVC/resolve/main/UVR_MDXNET_KARA_2.onnx
-
-```
-
-  
-
-Or download it manually from the [Hugging Face page](https://huggingface.co/AI4future/RVC/blob/main/UVR_MDXNET_KARA_2.onnx).
-
-  
-
-Place the model file in the project root directory.
+- C++ compiler with C++17 support
+- CMake (version 3.18 or higher)
+- `make` utility
 
 ## Building
 
-```bash
-g++ -O2 -I./onnxruntime/include -L./onnxruntime/lib \
--Wl,-rpath,./onnxruntime/lib \
--o separator main.cpp DSPCore.cpp ModelHandler.cpp kiss_fft.c \
--lonnxruntime
-```
+The project features a fully automated build system. Running `make` from the root directory handles everything needed to get the application running.
 
-## Preprocessing WAV Files
-
-The WAV parser requires a canonical WAV header format. Before using the tool, preprocess your input file with ffmpeg to strip metadata and ensure compatibility:
+To build the project:
 
 ```bash
-ffmpeg -i input.wav -map_metadata -1 -fflags +bitexact -acodec pcm_s16le -ar 44100 -ac 2 output.wav
+make
 ```
 
-This command:
-- Strips all metadata (`-map_metadata -1`)
-- Ensures bit-exact output (`-fflags +bitexact`)
-- Converts to 16-bit PCM (`-acodec pcm_s16le`)
-- Sets sample rate to 44.1kHz (`-ar 44100`)
-- Ensures stereo output (`-ac 2`)
+This single command will:
+1. **Setup ONNX Runtime:** Automatically download and extract the required libraries.
+2. **Download Model:** Download the `UVR_MDXNET_KARA_2.onnx` model into the `models/` directory.
+3. **Compile:** Build the `separator` executable inside the `build/` directory.
+
+The final executable will be located at `build/separator`.
+
+### Cleaning the build
+To remove all build artifacts (excluding downloaded libraries/models):
+```bash
+make clean
+```
 
 ## Usage
 
+The application automatically handles audio preprocessing using `ffmpeg` (which must be installed on your system). It converts any input audio to the required 16-bit PCM 44.1kHz stereo format internally.
+
 ```bash
-./separator <input.wav> <output.wav>
+./build/separator <input_file> <output.wav>
 ```
 
 **Example:**
-
 ```bash
-./separator song.wav instrumental.wav
+./build/separator song.mp3 instrumental.wav
 ```
 
 ## Project Structure

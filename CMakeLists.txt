@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.14)
+cmake_minimum_required(VERSION 3.18)
 project(mdxnet_cpp VERSION 1.0.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -18,10 +18,59 @@ set(ONNXRUNTIME_ROOT "${CMAKE_SOURCE_DIR}/onnxruntime")
 set(ONNXRUNTIME_INCLUDE_DIR "${ONNXRUNTIME_ROOT}/include")
 set(ONNXRUNTIME_LIB_DIR "${ONNXRUNTIME_ROOT}/lib")
 
-# Check if ONNX Runtime exists
+# Check if ONNX Runtime exists, if not download it
 if(NOT EXISTS "${ONNXRUNTIME_INCLUDE_DIR}")
-    message(FATAL_ERROR "ONNX Runtime not found at ${ONNXRUNTIME_ROOT}. "
-            "Please download and extract it to the project directory.")
+    message(STATUS "ONNX Runtime not found. Downloading...")
+    
+    set(ORT_VERSION "1.16.3")
+    set(ORT_URL "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-${ORT_VERSION}.tgz")
+    set(ORT_ARCHIVE "${CMAKE_BINARY_DIR}/onnxruntime.tgz")
+    
+    file(DOWNLOAD "${ORT_URL}" "${ORT_ARCHIVE}"
+        SHOW_PROGRESS
+        STATUS ORT_DOWNLOAD_STATUS
+    )
+    
+    list(GET ORT_DOWNLOAD_STATUS 0 ORT_DOWNLOAD_CODE)
+    if(NOT ORT_DOWNLOAD_CODE EQUAL 0)
+        message(FATAL_ERROR "Failed to download ONNX Runtime: ${ORT_DOWNLOAD_STATUS}")
+    endif()
+    
+    message(STATUS "Extracting ONNX Runtime...")
+    file(ARCHIVE_EXTRACT INPUT "${ORT_ARCHIVE}" DESTINATION "${CMAKE_SOURCE_DIR}")
+    
+    # Rename extracted folder to 'onnxruntime'
+    file(RENAME "${CMAKE_SOURCE_DIR}/onnxruntime-linux-x64-${ORT_VERSION}" "${ONNXRUNTIME_ROOT}")
+    
+    # Clean up
+    file(REMOVE "${ORT_ARCHIVE}")
+    
+    message(STATUS "ONNX Runtime installed successfully.")
+endif()
+
+# Model paths
+set(MODEL_DIR "${CMAKE_SOURCE_DIR}/models")
+set(MODEL_NAME "UVR_MDXNET_KARA_2.onnx")
+set(MODEL_PATH "${MODEL_DIR}/${MODEL_NAME}")
+set(MODEL_URL "https://huggingface.co/AI4future/RVC/resolve/main/${MODEL_NAME}")
+
+# Check if model exists, if not download it
+if(NOT EXISTS "${MODEL_PATH}")
+    message(STATUS "Model not found at ${MODEL_PATH}. Downloading...")
+    
+    file(MAKE_DIRECTORY "${MODEL_DIR}")
+    
+    file(DOWNLOAD "${MODEL_URL}" "${MODEL_PATH}"
+        SHOW_PROGRESS
+        STATUS MODEL_DOWNLOAD_STATUS
+    )
+    
+    list(GET MODEL_DOWNLOAD_STATUS 0 MODEL_DOWNLOAD_CODE)
+    if(NOT MODEL_DOWNLOAD_CODE EQUAL 0)
+        message(FATAL_ERROR "Failed to download model: ${MODEL_DOWNLOAD_STATUS}")
+    endif()
+    
+    message(STATUS "Model downloaded successfully.")
 endif()
 
 # Source files

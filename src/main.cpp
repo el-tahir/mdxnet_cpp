@@ -2,6 +2,9 @@
 #include <vector>
 #include <utility>
 #include <algorithm>
+#include <cstdlib>
+#include <cstdio>
+#include <ctime>
 #include "DSPCore.h"
 #include "kiss_fft.h"
 #include "ModelHandler.h"
@@ -10,6 +13,34 @@
 
 #include <cmath>
 
+std::string preprocess_input(const std::string& input_path, bool& needs_cleanup) {
+    std::srand(std::time(nullptr));
+    std::string temp_path = "temp_input_" + std::to_string(std::rand()) + ".wav";
+    
+    // Construct ffmpeg command
+    // -y: overwrite output files
+    // -map_metadata -1: strip metadata
+    // -fflags +bitexact: ensure bit-exact output
+    // -acodec pcm_s16le: 16-bit PCM encoding
+    // -ar 44100: 44.1kHz sample rate
+    // -ac 2: stereo
+    std::string cmd = "ffmpeg -y -i \"" + input_path + "\" "
+                      "-map_metadata -1 -fflags +bitexact "
+                      "-acodec pcm_s16le -ar 44100 -ac 2 "
+                      "\"" + temp_path + "\" -loglevel error";
+    
+    std::cout << "preprocessing input with ffmpeg..." << std::endl;
+    int ret = std::system(cmd.c_str());
+    
+    if (ret != 0) {
+        std::cerr << "ffmpeg preprocessing failed or ffmpeg not found. trying original file..." << std::endl;
+        needs_cleanup = false;
+        return input_path;
+    }
+    
+    needs_cleanup = true;
+    return temp_path;
+}
 
 void apply_noise_gate(std::vector<float>& stereo_audio, float threshold_db = -60.0f, int window_size = 2048) {
 
@@ -49,7 +80,7 @@ void run_seperation(const std::string& input_path, const std::string& output_pat
     std::cout << "loading " << input_path << "..." << std::endl;
     std::vector<float> stereo_buffer;
     WAVHeader header = read_wav(input_path, stereo_buffer);
-std::cout << "DEBUG: Stereo Buffer Size: " << stereo_buffer.size() << std::endl;
+std::cout << "DEBUG: stereo buffer size: " << stereo_buffer.size() << std::endl;
 
     // split channels
 
@@ -86,7 +117,7 @@ std::cout << "DEBUG: Stereo Buffer Size: " << stereo_buffer.size() << std::endl;
         all_right_frames.push_back(dsp.stft(right_frame));
 
     }
-    
+
     std::vector<std::vector<kiss_fft_cpx>> processed_left, processed_right;
 
     int batch_size = 256;
@@ -180,12 +211,22 @@ int main(int argc, char* argv[]) {
     std::string output_file = argv[2];
     std::string model_file = "models/UVR_MDXNET_KARA_2.onnx";
 
+    bool needs_cleanup = false;
+    std::string processed_file = preprocess_input(input_file, needs_cleanup);
+
     try {
-        run_seperation(input_file, output_file, model_file);
+        run_seperation(processed_file, output_file, model_file);
         std::cout << "done! saved to " << output_file << std::endl;
     } catch (const std::exception& e) {
         std::cerr << "error: " << e.what() << std::endl;
+        if (needs_cleanup) {
+            std::remove(processed_file.c_str());
+        }
         return 1;
+    }
+
+    if (needs_cleanup) {
+        std::remove(processed_file.c_str());
     }
 
     return 0;
