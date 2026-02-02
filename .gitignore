@@ -28,3 +28,8 @@ models/
 
 # External dependencies
 onnxruntime/
+
+# audio files
+*.flac
+*.mp3
+*.wav
