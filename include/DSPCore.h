@@ -15,6 +15,12 @@ class DSPCore {
 
     std::vector<float> window; //hann window
 
+    //scratch buffers to avoid reallocation
+    std::vector<kiss_fft_cpx> _stft_windowed;
+    std::vector<kiss_fft_cpx> _stft_output;
+    std::vector<kiss_fft_cpx> _istft_output;
+    std::vector<float> _istft_result;
+
     void create_hann_window();
 
     public:

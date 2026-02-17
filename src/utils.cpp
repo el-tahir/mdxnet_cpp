@@ -1,12 +1,12 @@
+#include "utils.h"
 #include <vector>
 #include <utility>
 #include <algorithm>
-#include "kiss_fft.h"
 
 std::vector<float> stft_to_tensor(const std::vector<std::vector<kiss_fft_cpx>>& left_stft, const std::vector<std::vector<kiss_fft_cpx>>& right_stft) {
     // 256 frames -> each 4096 bins
 
-    // since shape is [4, 2048, 256], index for (channel, freq, time) is 
+    // since shape is [4, 2048, 256], index for (channel, freq, time) is
     // index = (channel * 2048 * 256) + (freq * 256) + time
 
     std::vector<float> output;
@@ -33,7 +33,7 @@ std::vector<float> stft_to_tensor(const std::vector<std::vector<kiss_fft_cpx>>& 
 
 std::pair<std::vector<std::vector<kiss_fft_cpx>>, std::vector<std::vector<kiss_fft_cpx>>> tensor_to_stft(const std::vector<float>& model_output) {
 
-   
+
     std::vector<std::vector<kiss_fft_cpx>> left_stft(256, std::vector<kiss_fft_cpx>(4096));
     std::vector<std::vector<kiss_fft_cpx>> right_stft(256, std::vector<kiss_fft_cpx>(4096));
 

@@ -1,6 +1,5 @@
 #include <iostream>
 #include <vector>
-#include <utility>
 #include <algorithm>
 #include <cstdlib>
 #include <cstdio>
@@ -9,14 +8,14 @@
 #include "kiss_fft.h"
 #include "ModelHandler.h"
 #include "WAVHeader.h"
-#include "utils.cpp"
+#include "utils.h"
 
 #include <cmath>
 
 std::string preprocess_input(const std::string& input_path, bool& needs_cleanup) {
     std::srand(std::time(nullptr));
     std::string temp_path = "temp_input_" + std::to_string(std::rand()) + ".wav";
-    
+
     // Construct ffmpeg command
     // -y: overwrite output files
     // -map_metadata -1: strip metadata
@@ -28,16 +27,16 @@ std::string preprocess_input(const std::string& input_path, bool& needs_cleanup)
                       "-map_metadata -1 -fflags +bitexact "
                       "-acodec pcm_s16le -ar 44100 -ac 2 "
                       "\"" + temp_path + "\" -loglevel error";
-    
+
     std::cout << "preprocessing input with ffmpeg..." << std::endl;
     int ret = std::system(cmd.c_str());
-    
+
     if (ret != 0) {
         std::cerr << "ffmpeg preprocessing failed or ffmpeg not found. trying original file..." << std::endl;
         needs_cleanup = false;
         return input_path;
     }
-    
+
     needs_cleanup = true;
     return temp_path;
 }

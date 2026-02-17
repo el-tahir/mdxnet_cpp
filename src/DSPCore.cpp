@@ -9,6 +9,13 @@ DSPCore::DSPCore(uint32_t n_fft, uint32_t hop_length)
 
     create_hann_window();
 
+    //pre-allocate scratch buffers
+
+    _stft_windowed.resize(n_fft);
+    _stft_output.resize(n_fft);
+    _istft_output.resize(n_fft);
+    _istft_result.resize(n_fft);
+
 }
 
 DSPCore::~DSPCore() {
@@ -33,40 +40,32 @@ std::vector<kiss_fft_cpx> DSPCore::stft(const std::vector<float>& frame) {
         throw std::runtime_error("input size != n_fft");
     }
 
-    std::vector<kiss_fft_cpx> windowed;
-    windowed.resize(n_fft);
 
     for (uint32_t i = 0; i < n_fft; i++) {
-        windowed[i].r = window[i] * frame[i];
-        windowed[i].i = 0;
+        _stft_windowed[i].r = window[i] * frame[i];
+        _stft_windowed[i].i = 0;
     }
 
-    std::vector<kiss_fft_cpx> output;
-    output.resize(n_fft);
 
-    kiss_fft(forward, windowed.data(), output.data());
+    kiss_fft(forward, _stft_windowed.data(), _stft_output.data());
 
-    return output;
+    return _stft_output;
 }
 
 std::vector<float> DSPCore::istft(const std::vector<kiss_fft_cpx>& frame) {
-    
+
     if (frame.size() != n_fft) {
         throw std::runtime_error("input size != n_fft");
     }
 
-    std::vector<kiss_fft_cpx> output(n_fft);
-
-    kiss_fft(inverse, frame.data(), output.data());
-
-    std::vector<float> result(n_fft);
+    kiss_fft(inverse, frame.data(), _istft_output.data());
 
     // apply window and normalize (window is applied in istft for overlap-add reconstruction)
     for (uint32_t i = 0; i < n_fft; i++) {
-        result[i] = window[i] * (output[i].r / n_fft);
+        _istft_result[i] = window[i] * (_istft_output[i].r / n_fft);
     }
 
-    return result;
+    return _istft_result;
 
 
 }

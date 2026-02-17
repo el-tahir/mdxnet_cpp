@@ -2,12 +2,9 @@
 #include <iostream>
 
 void ModelHandler::load_model(const std::string& model_path) {
-    if (model != nullptr) {
-        delete model;
-    }
 
     try {
-        model = new Ort::Session(env, model_path.c_str(), config);
+        model = std::make_unique<Ort::Session>(env, model_path.c_str(), config);
 
         std::cout << "model loaded successfully: " << model_path << std::endl;
 
@@ -20,7 +17,7 @@ void ModelHandler::load_model(const std::string& model_path) {
 
 std::vector<float> ModelHandler::run_inference(const std::vector<float>& input_data, const std::vector<int64_t>& input_shape) {
 
-    if (model == nullptr) {
+    if (!model) {
         throw std::runtime_error("model not loaded! call load_model() first");
     }
 
@@ -38,13 +35,13 @@ std::vector<float> ModelHandler::run_inference(const std::vector<float>& input_d
     Ort::AllocatedStringPtr output_name_ptr = model->GetOutputNameAllocated(0, allocator);
 
     const char* input_names[] = {input_name_ptr.get()};
-    
+
     const char* output_names[] = { output_name_ptr.get()};
 
 
     auto output_tensors = model->Run(
-        Ort::RunOptions{nullptr}, 
-        input_names, &input_tensor, 1, 
+        Ort::RunOptions{nullptr},
+        input_names, &input_tensor, 1,
         output_names, 1
     );
 
