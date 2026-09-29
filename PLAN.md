@@ -1,9 +1,11 @@
-# Plan: dependency-free forward pass for `UVR_MDXNET_KARA_2.onnx`
+# Plan: dependency-free C port of the separator, including the `UVR_MDXNET_KARA_2.onnx` forward pass
 
-Goal: replace ONNX Runtime with a hand-written forward pass in plain C99, in the
-spirit of karpathy/llama2.c. Every multiply-add the model does should be visible
-as a loop in our source. Python is used only offline (export + verification),
-never at runtime.
+Goal: rewrite the whole separator in plain C99, in the spirit of
+karpathy/llama2.c: WAV I/O, FFT, STFT/ISTFT, the MDX-Net forward pass and the
+CLI. No ONNX Runtime, no C++, no vendored libraries — every computation from
+input samples to output samples is a loop in our own source. Runtime needs only
+libc + libm. Python is used only offline (weight export + verification), never
+at runtime.
 
 ---
 
@@ -79,20 +81,26 @@ code mirrors the ONNX graph 1:1. Folding it is an optional later optimization.
 
 ---
 
-## 3. Repository layout (proposed)
+## 3. Repository layout (target)
 
 ```
+src/main.c              CLI + separation pipeline (replaces main.cpp)
+src/wav.c   / wav.h     WAV read/write (replaces WAVHeader.h)
+src/fft.c   / fft.h     our own radix-2 complex FFT (replaces kiss_fft)
+src/stft.c  / stft.h    Hann window, reflect pad, STFT/ISTFT, overlap-add (replaces DSPCore.cpp, utils.cpp)
+src/mdx.c   / mdx.h     model: weight loading, buffers, kernels, forward pass (replaces ModelHandler.cpp + ORT)
+tests/test_fft.c        FFT vs naive O(N²) DFT
+tests/test_stft.c       STFT→ISTFT round trip reconstructs the input
+tests/test_mdx.c        kernels + forward pass vs ORT dumps
 tools/reference.py      numpy forward pass (the verified spec, ~60 lines)
 tools/export.py         ONNX → models/kara.bin (header + raw float32 weights)
 tools/dump_acts.py      runs ORT, writes fixed input + tapped activations for tests
-include/mdx.h           C API: mdx_load / mdx_forward / mdx_free
-src/mdx.c               C99 forward pass: weight mapping, buffers, kernels
-tests/test_mdx.c        compares mdx_forward (and taps) against ORT dumps
+Makefile                `cc -O3 -o separator src/*.c -lm`, plus `test` target
 ```
 
-Runtime dependencies: libc + libm. (OpenMP pragmas in the perf phase are
-optional and compile away without `-fopenmp`.) The C++ app calls `mdx.h` via
-`extern "C"`; `ModelHandler` / ORT get removed at the end.
+Deleted at the end: all `.cpp`/`.h` C++ sources, `third_party/kiss_fft/`,
+`CMakeLists.txt` (it only exists to download ORT and the model). OpenMP pragmas
+in the perf phase are optional and compile away without `-fopenmp`.
 
 ---
 
@@ -134,7 +142,40 @@ performs the same shape arithmetic and checks the file size matches exactly.
 
 ---
 
-## 5. Memory plan
+## 5. The rest of the app in C
+
+The C port reproduces the current C++ pipeline step for step, so the old binary
+can serve as the reference for end-to-end parity.
+
+| Step | Current C++ | C replacement | Exact behaviour to preserve |
+|---|---|---|---|
+| Decode | `preprocess_input` → `system("ffmpeg …")` | `system()` in `main.c` | ffmpeg converts any input to s16le 44.1 kHz stereo WAV in a temp file; falls back to the original file if ffmpeg fails. ffmpeg is an optional external program, not a linked dependency. |
+| Read | `read_wav` | `wav_read` | 44.1 kHz only; PCM s16 (`/32768`) or float32; mono duplicated to stereo; deinterleave to L/R |
+| Pad | `DSPCore::pad_audio` | `stft_pad` | reflect pad `n_fft/2 = 2048` samples each side: `p[i] = x[2047−i]`, tail `x[N−1−i]` |
+| Window | `create_hann_window` | `stft_init` | periodic Hann: `w[n] = 0.5·(1 − cos(2πn/4096))` |
+| STFT | `DSPCore::stft` | `stft_frame` | frame every `hop = 1024`; `X = FFT(w·x)`, full 4096 complex bins |
+| Pack | `stft_to_tensor` | `pack_chunk` | 256 frames per chunk → `[4,2048,256]` = (L.re, L.im, R.re, R.im) × bins 0..2047 × frames; **bins 0–2 forced to 0**; short last chunk zero-filled |
+| Model | `ModelHandler::run_inference` | `mdx_forward` | sections 1–2 |
+| Unpack | `tensor_to_stft` | `unpack_chunk` | bins 0..2047 from tensor; `X[0].im = 0`; Nyquist `X[2048] = 0`; `X[4096−k] = conj(X[k])` for k = 1..2047 |
+| ISTFT | `DSPCore::istft` | `istft_frame` | `y = w · Re(IFFT(X)) / 4096` |
+| Overlap-add | `run_seperation` | `main.c` | add each frame at `frame·1024`, crop the 2048-sample pad, divide by 1.5 (Σw² for 75% overlap) |
+| Noise gate | `apply_noise_gate` | `noise_gate` | threshold −40 dB, RMS over ±2048 interleaved samples; zero both channels of a frame below threshold |
+| Write | `write_wav` | `wav_write` | 44-byte header, float32 stereo |
+
+**FFT:** kiss_fft is replaced by our own iterative radix-2 Cooley–Tukey FFT
+(n = 4096 is a power of two): bit-reversal permutation, then log₂N butterfly
+stages with precomputed twiddles `e^{−2πik/N}`; inverse uses `+` sign and no
+scaling (matching kiss_fft, the `/4096` stays in ISTFT). ~60 lines. Verified
+against a naive O(N²) DFT in double precision.
+
+**Quirks carried over as-is for parity** (fix after parity is proven, each as its
+own change): the WAV reader assumes a bare 44-byte header (works because ffmpeg
+is run with `-fflags +bitexact -map_metadata -1`); the noise gate is
+O(N·4096); the whole song's STFT is held in memory.
+
+---
+
+## 6. Memory plan
 
 All buffers allocated once in `mdx_load`; `mdx_forward` does no allocation.
 
@@ -149,7 +190,7 @@ All buffers allocated once in `mdx_load`; `mdx_forward` does no allocation.
 
 ---
 
-## 6. Verification strategy
+## 7. Verification strategy
 
 1. `dump_acts.py` feeds a fixed seeded input to ORT, with these node outputs
    added as extra graph outputs, and saves each as raw float32:
@@ -168,8 +209,11 @@ All buffers allocated once in `mdx_load`; `mdx_forward` does no allocation.
    equality isn't expected; the numpy ref already lands at ~3e-6).
 3. Per-kernel unit tests on small random tensors against numpy, so a bug is
    pinned to one kernel before it pollutes a whole block.
-4. End-to-end: separate a real song with ORT and with `mdx`, compare the output
-   WAVs (SNR between them should be > 60 dB).
+4. DSP: `test_fft` (vs naive DFT, max error < 1e-4 relative) and `test_stft`
+   (pad → STFT → ISTFT → OLA → crop → /1.5 reproduces the input, > 90 dB SNR).
+5. End-to-end: before deleting the C++ code, build it once and keep its output
+   for a few songs as golden WAVs. The C `separator` must match them with
+   SNR > 60 dB.
 
 Speed-up for tests: the model is fully convolutional in T (only F is baked into
 the TDF weights), so `dump_acts.py` can relax the input dim to allow e.g.
@@ -177,7 +221,7 @@ T=32 — 8× less compute per test run. The C code handles any T divisible by 32
 
 ---
 
-## 7. Milestones
+## 8. Milestones
 
 Each milestone ends with a passing check; nothing proceeds on a red check.
 
@@ -189,12 +233,14 @@ Each milestone ends with a passing check; nothing proceeds on a red check.
 | M3 | first_conv + transpose + enc0 TFC_TDF | taps `447`, `466` match |
 | M4 | full encoder + bottleneck | taps through `571` match |
 | M5 | decoder + final conv | `output` matches < 1e-4 rel |
-| M6 | Wire into `separator`, remove ORT from CMake | real song separated; WAV SNR vs ORT build > 60 dB; builds with no network download |
-| M7 | Performance (see below), naive kernels kept behind a flag | taps still match; per-chunk time within ~2× of ORT |
+| M6 | `fft.c`, `stft.c` + tests | `test_fft`, `test_stft` pass |
+| M7 | `wav.c`, `main.c`: full pipeline in C; golden WAVs recorded from the C++ build first | C `separator` output SNR > 60 dB vs golden WAVs |
+| M8 | Delete C++ sources, kiss_fft, CMake; plain `Makefile` | `make && make test` works on a clean checkout with only a C compiler |
+| M9 | Performance (see below), naive kernels kept behind a flag | taps still match; per-chunk time within ~2× of ORT |
 
 ---
 
-## 8. Performance (M7)
+## 9. Performance (M9)
 
 Budget: a 3-min song ≈ 7.7k frames ≈ 31 chunks ≈ 14.6 TFLOP.
 ORT on this 4-core box: 4.4 s/chunk (~2.3 min/song).
@@ -211,13 +257,14 @@ TDF matmuls reuse the same SGEMM. Everything stays dependency-free (no BLAS).
 
 ---
 
-## 9. Open decisions
+## 10. Open decisions
 
-1. **C99 vs C++**: plan assumes the model core is C99 (`mdx.c`) and the existing
-   C++ app (WAV/STFT/CLI) stays C++. Alternative: port the whole app to C.
-2. **BatchNorm**: keep explicit (current plan, 1:1 with ONNX) vs fold at export.
-3. **Transposes**: keep explicit (mirrors ONNX) vs fold into first/final conv
+1. **Language**: decided — everything is C99; no C++ remains.
+2. **ffmpeg**: kept as an optional external program via `system()` (as today).
+   Alternative: drop it and accept only 44.1 kHz WAV input.
+3. **BatchNorm**: keep explicit (current plan, 1:1 with ONNX) vs fold at export.
+4. **Transposes**: keep explicit (mirrors ONNX) vs fold into first/final conv
    indexing (saves 2 × 96 MiB copies, negligible time).
-4. **Other MDX-Net models**: header already carries the hyperparameters, so
+5. **Other MDX-Net models**: header already carries the hyperparameters, so
    supporting e.g. dim_f=3072 models is mostly an `export.py` concern — out of
    scope until Kara is bit-for-bit solid.
