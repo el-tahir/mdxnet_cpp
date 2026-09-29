@@ -1,11 +1,15 @@
 # Plan: dependency-free C port of the separator, including the `UVR_MDXNET_KARA_2.onnx` forward pass
 
-Goal: rewrite the whole separator in plain C99, in the spirit of
+Goal: write a second, self-contained implementation of the whole separator in
+plain C99 under `plain_c/`, in the spirit of
 karpathy/llama2.c: WAV I/O, FFT, STFT/ISTFT, the MDX-Net forward pass and the
 CLI. No ONNX Runtime, no C++, no vendored libraries — every computation from
 input samples to output samples is a loop in our own source. Runtime needs only
 libc + libm. Python is used only offline (weight export + verification), never
 at runtime.
+
+The existing C++/ORT implementation stays in the repo untouched and is kept as
+the reference: every C result is checked against it (or against ORT directly).
 
 ---
 
@@ -83,24 +87,33 @@ code mirrors the ONNX graph 1:1. Folding it is an optional later optimization.
 
 ## 3. Repository layout (target)
 
+All new code lives in `plain_c/`. Nothing outside it changes (apart from
+`.gitignore` entries for its build outputs).
+
 ```
-src/main.c              CLI + separation pipeline (replaces main.cpp)
-src/wav.c   / wav.h     WAV read/write (replaces WAVHeader.h)
-src/fft.c   / fft.h     our own radix-2 complex FFT (replaces kiss_fft)
-src/stft.c  / stft.h    Hann window, reflect pad, STFT/ISTFT, overlap-add (replaces DSPCore.cpp, utils.cpp)
-src/mdx.c   / mdx.h     model: weight loading, buffers, kernels, forward pass (replaces ModelHandler.cpp + ORT)
-tests/test_fft.c        FFT vs naive O(N²) DFT
-tests/test_stft.c       STFT→ISTFT round trip reconstructs the input
-tests/test_mdx.c        kernels + forward pass vs ORT dumps
-tools/reference.py      numpy forward pass (the verified spec, ~60 lines)
-tools/export.py         ONNX → models/kara.bin (header + raw float32 weights)
-tools/dump_acts.py      runs ORT, writes fixed input + tapped activations for tests
-Makefile                `cc -O3 -o separator src/*.c -lm`, plus `test` target
+mdxnet_cpp/
+├── src/, include/, tests/, third_party/, CMakeLists.txt, Makefile   C++/ORT reference — kept as-is
+├── models/UVR_MDXNET_KARA_2.onnx                                     shared, gitignored
+└── plain_c/
+    ├── main.c              CLI + separation pipeline (mirrors src/main.cpp)
+    ├── wav.c   / wav.h     WAV read/write (mirrors include/WAVHeader.h)
+    ├── fft.c   / fft.h     our own radix-2 complex FFT (instead of kiss_fft)
+    ├── stft.c  / stft.h    Hann window, reflect pad, STFT/ISTFT, pack/unpack (mirrors DSPCore.cpp, utils.cpp)
+    ├── mdx.c   / mdx.h     model: weight loading, buffers, kernels, forward pass (instead of ModelHandler.cpp + ORT)
+    ├── tests/test_fft.c    FFT vs naive O(N²) DFT
+    ├── tests/test_stft.c   STFT→ISTFT round trip reconstructs the input
+    ├── tests/test_mdx.c    kernels + forward pass vs ORT dumps
+    ├── tools/reference.py  numpy forward pass (the verified spec, ~60 lines)
+    ├── tools/export.py     ../models/*.onnx → models/kara.bin (header + raw float32 weights)
+    ├── tools/dump_acts.py  runs ORT, writes fixed input + tapped activations for tests
+    ├── models/             kara.bin (gitignored)
+    └── Makefile            `cc -O3 -o separator *.c -lm`, plus `test` target
 ```
 
-Deleted at the end: all `.cpp`/`.h` C++ sources, `third_party/kiss_fft/`,
-`CMakeLists.txt` (it only exists to download ORT and the model). OpenMP pragmas
-in the perf phase are optional and compile away without `-fopenmp`.
+`plain_c/` shares no code with the C++ tree (it does not use kiss_fft or any
+header from `include/`), so `cd plain_c && make` needs only a C compiler.
+OpenMP pragmas in the perf phase are optional and compile away without
+`-fopenmp`.
 
 ---
 
@@ -144,12 +157,12 @@ performs the same shape arithmetic and checks the file size matches exactly.
 
 ## 5. The rest of the app in C
 
-The C port reproduces the current C++ pipeline step for step, so the old binary
-can serve as the reference for end-to-end parity.
+The C version reproduces the C++ pipeline step for step, so the C++ binary
+serves as the reference for end-to-end parity, now and after future changes.
 
 | Step | Current C++ | C replacement | Exact behaviour to preserve |
 |---|---|---|---|
-| Decode | `preprocess_input` → `system("ffmpeg …")` | `system()` in `main.c` | ffmpeg converts any input to s16le 44.1 kHz stereo WAV in a temp file; falls back to the original file if ffmpeg fails. ffmpeg is an optional external program, not a linked dependency. |
+| Decode | `preprocess_input` → `system("ffmpeg …")` | `system()` in `main.c` | called **exactly once, before anything else**: converts any input to s16le 44.1 kHz stereo WAV in a temp file; falls back to the original file if ffmpeg fails; temp file removed at exit. Nothing after this step invokes an external program — everything from WAV samples to output WAV is our C code. |
 | Read | `read_wav` | `wav_read` | 44.1 kHz only; PCM s16 (`/32768`) or float32; mono duplicated to stereo; deinterleave to L/R |
 | Pad | `DSPCore::pad_audio` | `stft_pad` | reflect pad `n_fft/2 = 2048` samples each side: `p[i] = x[2047−i]`, tail `x[N−1−i]` |
 | Window | `create_hann_window` | `stft_init` | periodic Hann: `w[n] = 0.5·(1 − cos(2πn/4096))` |
@@ -211,9 +224,10 @@ All buffers allocated once in `mdx_load`; `mdx_forward` does no allocation.
    pinned to one kernel before it pollutes a whole block.
 4. DSP: `test_fft` (vs naive DFT, max error < 1e-4 relative) and `test_stft`
    (pad → STFT → ISTFT → OLA → crop → /1.5 reproduces the input, > 90 dB SNR).
-5. End-to-end: before deleting the C++ code, build it once and keep its output
-   for a few songs as golden WAVs. The C `separator` must match them with
-   SNR > 60 dB.
+5. End-to-end: run the C++ `separator` and `plain_c/separator` on the same
+   songs; the outputs must match with SNR > 60 dB. A `plain_c/tools/compare_wav.py`
+   (or a small C tool) reports the SNR. Since the C++ build stays in the repo,
+   this check can be rerun any time.
 
 Speed-up for tests: the model is fully convolutional in T (only F is baked into
 the TDF weights), so `dump_acts.py` can relax the input dim to allow e.g.
@@ -234,8 +248,8 @@ Each milestone ends with a passing check; nothing proceeds on a red check.
 | M4 | full encoder + bottleneck | taps through `571` match |
 | M5 | decoder + final conv | `output` matches < 1e-4 rel |
 | M6 | `fft.c`, `stft.c` + tests | `test_fft`, `test_stft` pass |
-| M7 | `wav.c`, `main.c`: full pipeline in C; golden WAVs recorded from the C++ build first | C `separator` output SNR > 60 dB vs golden WAVs |
-| M8 | Delete C++ sources, kiss_fft, CMake; plain `Makefile` | `make && make test` works on a clean checkout with only a C compiler |
+| M7 | `wav.c`, `main.c`: full pipeline in C | `plain_c/separator` output SNR > 60 dB vs the C++ `separator` on the same songs |
+| M8 | `plain_c/Makefile` with `test` target; README section | `cd plain_c && make && make test` works on a clean checkout with only a C compiler (plus `kara.bin` from `export.py`) |
 | M9 | Performance (see below), naive kernels kept behind a flag | taps still match; per-chunk time within ~2× of ORT |
 
 ---
@@ -259,9 +273,10 @@ TDF matmuls reuse the same SGEMM. Everything stays dependency-free (no BLAS).
 
 ## 10. Open decisions
 
-1. **Language**: decided — everything is C99; no C++ remains.
-2. **ffmpeg**: kept as an optional external program via `system()` (as today).
-   Alternative: drop it and accept only 44.1 kHz WAV input.
+1. **Language**: decided — everything in `plain_c/` is C99; the C++/ORT
+   implementation stays in the repo as the reference.
+2. **ffmpeg**: decided — kept, invoked once via `system()` to decode the input
+   before the pipeline starts; never called afterwards.
 3. **BatchNorm**: keep explicit (current plan, 1:1 with ONNX) vs fold at export.
 4. **Transposes**: keep explicit (mirrors ONNX) vs fold into first/final conv
    indexing (saves 2 × 96 MiB copies, negligible time).
