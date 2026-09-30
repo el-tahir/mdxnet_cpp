@@ -21,8 +21,8 @@ Branch: `claude/chat-session-5b6r4k`
 | M4 | full encoder + bottleneck; taps through `571` match | **done** (with M3) | `7cd6f52` |
 | M5 | decoder + final conv; `output` matches < 1e-4 rel | **done** (with M3) | `7cd6f52` |
 | M6 | `fft.c`, `stft.c` + tests | **done** | `b2d71de` |
-| M7 | `wav.c`, `main.c`: full C pipeline, SNR > 60 dB vs C++ `separator` | next | |
-| M8 | `plain_c/Makefile` `test` target complete; README section | todo | |
+| M7 | `wav.c`, `main.c`: full C pipeline, SNR > 60 dB vs C++ `separator` | **done** | `5274de0`, M7_COMMIT |
+| M8 | `plain_c/Makefile` `test` target complete; README section | next | |
 | M9 | performance | todo | |
 
 ### Verified results so far
@@ -51,6 +51,12 @@ Branch: `claude/chat-session-5b6r4k`
   interior; pack/unpack layout and dropped bins exact. One-off check against the
   real C++ `DSPCore` + kiss_fft (harness compiled in scratch, not committed):
   STFT frame rel err 4.1e-8, ISTFT 1.5e-7. Both tests clean under ASan/UBSan.
+- M7: end-to-end on a 10 s synthetic clip (`tools/make_test_clip.py`, encoded to
+  mp3 so both binaries go through ffmpeg): `plain_c/separator` vs C++
+  `build/separator` → headers byte-identical, same length (441,000 samples/ch),
+  **SNR 116.2 dB**, max |diff| 4.2e-7 (peak 0.71), noise-gate decisions identical
+  (0 samples zeroed in only one file), temp file cleaned up. C++: 10 s total;
+  C (naive): 681 s (~335 s per 256-frame chunk). `test_wav`: 7/7.
 
 ---
 
@@ -88,7 +94,21 @@ python3 tools/reference.py ../models/UVR_MDXNET_KARA_2.onnx   # numpy vs ORT (~3
 ```
 
 `models/` (both top-level and `plain_c/models/`) is gitignored; so are
-`plain_c/test_*` binaries.
+`plain_c/test_*`, `separator`, `compare_wav` binaries.
+
+For the end-to-end parity check (M7) you also need ffmpeg and the C++ build:
+
+```bash
+# this container had no ffmpeg and apt couldn't install it; a static build via pip works:
+pip install imageio-ffmpeg
+ln -sf "$(python3 -c 'import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())')" /usr/local/bin/ffmpeg
+
+make                                   # at repo root: C++ reference → build/separator (CMake downloads ORT 1.16.3)
+python3 plain_c/tools/make_test_clip.py /tmp/clip.wav 10 && ffmpeg -y -i /tmp/clip.wav /tmp/clip.mp3
+./build/separator /tmp/clip.mp3 /tmp/out_cpp.wav        # run from repo root (model path is relative)
+cd plain_c && make && ./separator /tmp/clip.mp3 /tmp/out_c.wav   # ~11 min with the naive kernels
+./compare_wav /tmp/out_cpp.wav /tmp/out_c.wav           # expect > 60 dB (got 116.2)
+```
 
 ---
 
@@ -108,6 +128,11 @@ python3 tools/reference.py ../models/UVR_MDXNET_KARA_2.onnx   # numpy vs ORT (~3
 | `fft.c` / `fft.h` | `Complex {re, im}`, `FFTPlan` (`fft_init(p, n)`, power of 2 only): iterative radix-2 DIT, bit-reversal table + cos/sin twiddle tables (computed in double, stored float). `fft_forward` (e^{-i}), `fft_inverse` (e^{+i}, **no 1/n**, like kiss_fft). |
 | `stft.c` / `stft.h` | `stft_hann` (periodic, double precision like the C++), `stft_reflect_pad` (edge sample repeated, like `DSPCore::pad_audio`), `stft_frame`, `istft_frame` (÷n and window applied here), `pack_chunk` / `unpack_chunk` (frames ↔ `[4][F][T]` model tensor; bins 0–2 zeroed on pack; unpack zeroes bins F..n/2 and mirrors conjugates). Framing / overlap-add / ÷1.5 live in the caller (see `tests/test_stft.c` §3 for the exact loop `main.c` needs). |
 | `tests/test_fft.c`, `tests/test_stft.c` | See M6 results above. No data files, no Python. |
+| `wav.c` / `wav.h` | Port of `include/WAVHeader.h`: 44-byte header parsed field by field (little-endian, no `#pragma pack`), 44.1 kHz PCM16 (`/32768`) or float32, mono → stereo. `wav_write` copies the input header and patches format fields (float, 2 ch, 32 bit, sizes) → byte-identical header to the C++ output. Rejects what the C++ would misread (24-bit, 48 kHz…). |
+| `main.c` | `separator in out [models/kara.bin]`. ffmpeg once via `system()` (paths single-quoted) → temp WAV, fallback to the original file. Then the C++ pipeline step for step, **but chunk by chunk**: STFT 256 frames → `pack_chunk` → `mdx_forward` → `unpack_chunk` → ISTFT + overlap-add, so memory stays at ~375 MB model state + the signal (the C++ holds the whole song's STFT; output identical since frames are independent and added in the same order). Then crop, ÷1.5, `noise_gate` (in place, same float math: `powf`, `sqrtf`, later windows see zeroed samples), write. Errors out on inputs < 2048 samples (the C++ reads out of bounds there). |
+| `tools/compare_wav.c` | `compare_wav ref.wav test.wav [min_snr]`: header match, SNR, max diff, bit-identical count, gate mismatches. Built by `make`. |
+| `tools/make_test_clip.py` | Deterministic synthetic 10 s clip (chords, centred "voice", drums, silent gap). |
+| `tests/test_wav.c` | Hand-written WAV files: pcm16 mono/stereo, write header patching, float round trip, rejects. |
 | `tools/dump_acts.py` | Runs ORT with relaxed T (default 32) and the 13 taps as extra outputs; writes `tests/data/acts_T<T>/{input,<tap>}.bin` + `taps.txt` (57 MB at T=32, gitignored). |
 | `tests/test_forward.c` | Runs `mdx_forward` on the dumped input; the tap callback compares each block's output to ORT as it's produced (< 1e-4 rel), printing elapsed time. T is read from the dump. |
 | `Makefile` | `make` builds tests; `make test` creates `kara.bin` and `acts_T32/` if missing (needs Python for those two), then runs all three tests. Flags: `-O2 -std=c99 -Wall -Wextra -pedantic`. |
@@ -135,30 +160,31 @@ python3 tools/reference.py ../models/UVR_MDXNET_KARA_2.onnx   # numpy vs ORT (~3
 - C++ Hann is `0.5f * (1.0f - std::cos(2.0f * M_PI * n / n_fft))`: `M_PI` is a
   double, so it's evaluated in **double** and rounded once. Match that, not a
   float `cosf` version.
+- `/usr/bin/time` isn't installed here; time runs with `date +%s`.
+- The C++ `build/separator` resolves `models/UVR_MDXNET_KARA_2.onnx` relative to
+  the cwd — run it from the repo root. `plain_c/separator` defaults to
+  `models/kara.bin` relative to `plain_c/`.
 - The C++ framing attenuates the first/last ~1024 output samples (gain down to
   0.63, fewer overlapping windows than the interior, fixed ÷1.5). That is
   reference behaviour — reproduce it for parity, don't "fix" it yet (PLAN.md §5 quirks).
 
 ---
 
-## Next up: M7 (full separator in C, parity with the C++ build)
+## Next up: M8 (packaging), then M9 (performance)
 
-1. `plain_c/wav.c/.h`: port `include/WAVHeader.h` exactly — packed 44-byte
-   header read in one go (assumes no extra chunks: fine because ffmpeg output is
-   `-fflags +bitexact -map_metadata -1`), 44.1 kHz only, PCM s16 (`/32768`) or
-   float32, mono duplicated to stereo; writer emits float32 stereo, 44-byte header.
-   Read/write header fields byte by byte (little-endian) instead of `#pragma pack`.
-2. `plain_c/main.c`: port `src/main.cpp` step for step (PLAN.md §5 table):
-   ffmpeg once via `system()` into a temp file (fallback to the original file),
-   read, deinterleave, reflect pad, frames every 1024, chunks of 256 frames →
-   `pack_chunk` → `mdx_forward` (T=256) → `unpack_chunk` (only the valid frames),
-   ISTFT + overlap-add, crop pad, ÷1.5, interleave, noise gate (−40 dB, window
-   2048, same O(N·window) loop), write, remove temp file.
-   Model path: `models/kara.bin` by default (C++ uses `models/UVR_MDXNET_KARA_2.onnx`).
-3. Parity: build the C++ reference (`make` at repo root; CMake downloads ORT
-   1.16.3 from GitHub — check the network allows it) and run both separators on
-   the same short clip. No audio is in the repo: use any short music clip
-   (e.g. generate one with ffmpeg, or a public-domain file). Keep it short —
-   the naive C forward is ~287 s per 256-frame chunk (~6 s of audio), so a 10 s
-   clip ≈ 2 chunks ≈ 10 min. Add a small compare tool (C or Python) that prints
-   the SNR between the two output WAVs; target > 60 dB.
+M8:
+1. `plain_c/README.md`: what it is, build (`make`), one-time model export
+   (`python3 tools/export.py`), usage, tests, and a short tour of the forward pass
+   (point at `tools/reference.py` and `mdx.c`).
+2. Short `plain_c/` section in the top-level `README.md` linking to it (the only
+   edit outside `plain_c/`, allowed: docs).
+3. Check `make clean && make && make test` from a clean checkout (after
+   exporting `kara.bin` and dumping `acts_T32`) works with only a C compiler for
+   the C parts.
+
+M9 (the big one): the naive forward is ~335 s per chunk vs ORT's ~4 s. conv3x3 is
+81% of FLOPs. Keep the naive kernels as the reference (e.g. behind a flag or in
+the tests) and add fast ones: loop reordering so the innermost loop runs over
+contiguous W with `-O3 -march=native` auto-vectorisation first, then OpenMP over
+output channels, then im2col + blocked SGEMM. Every step must keep `test_forward`
+(T=32) passing and the M7 parity (> 60 dB) intact.
