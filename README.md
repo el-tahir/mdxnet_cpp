@@ -63,6 +63,10 @@ The application automatically handles audio preprocessing using `ffmpeg` (which 
 ./build/separator song.mp3 instrumental.wav
 ```
 
+## Plain C version (`plain_c/`)
+
+`plain_c/` has a second implementation of the same separator in dependency-free C99, with the MDX-Net forward pass, FFT, STFT and WAV I/O written out as plain loops and no ONNX Runtime. Its output matches this C++ version (116 dB SNR). See [`plain_c/README.md`](plain_c/README.md).
+
 ## Project Structure
 
 | File | Description |
