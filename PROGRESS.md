@@ -17,9 +17,9 @@ Branch: `claude/chat-session-5b6r4k`
 | M0 | `plain_c/tools/reference.py` numpy forward pass matches ORT | **done** | `4b2681f` |
 | M1 | `tools/export.py` → `kara.bin`; `mdx_load` in C; `tests/test_load.c` | **done** | `8452b6d` |
 | M2 | 9 kernels (naive loops) + unit tests vs numpy | **done** | `f6f7190` |
-| M3 | first_conv + transpose + enc0 TFC_TDF; taps `447`, `466` match | **done** | M3_COMMIT |
-| M4 | full encoder + bottleneck; taps through `571` match | **done** (with M3) | M3_COMMIT |
-| M5 | decoder + final conv; `output` matches < 1e-4 rel | **done** (with M3) | M3_COMMIT |
+| M3 | first_conv + transpose + enc0 TFC_TDF; taps `447`, `466` match | **done** | `7cd6f52` |
+| M4 | full encoder + bottleneck; taps through `571` match | **done** (with M3) | `7cd6f52` |
+| M5 | decoder + final conv; `output` matches < 1e-4 rel | **done** (with M3) | `7cd6f52` |
 | M6 | `fft.c`, `stft.c` + tests | next | |
 | M7 | `wav.c`, `main.c`: full C pipeline, SNR > 60 dB vs C++ `separator` | todo | |
 | M8 | `plain_c/Makefile` `test` target complete; README section | todo | |
