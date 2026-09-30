@@ -39,7 +39,10 @@ Branch: `claude/chat-session-5b6r4k`
   checks every block's output, so the milestones stayed separately verified):
   `test_forward` at T=32, all 13 taps match ORT. Worst rel err per tap ≤ 2.2e-6
   inside the net, 4.8e-6 at `output` (tolerance 1e-4). Naive loops: 34 s at T=32
-  (`-O2`, 1 thread). Full-size T=256 run: in progress (see follow-up commit).
+  (`-O2`, 1 thread).
+  Full size T=256 (`python3 tools/dump_acts.py ../models/UVR_MDXNET_KARA_2.onnx 256`, 450 MB dump):
+  all 13 taps match, worst 2.3e-6 inside the net, 4.8e-6 at `output`; 287 s naive.
+  T=32 run clean under ASan/UBSan (no errors, no leaks).
 
 ---
 
