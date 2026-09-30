@@ -60,6 +60,36 @@ int mdx_load(MdxModel *m, const char *path);
 void mdx_free(MdxModel *m);
 
 /* ------------------------------------------------------------------------- */
+/* forward pass */
+
+/* Called after each block with the block's output. Names and layouts:
+ *   "first"            [growth][F][T]       after first conv + relu (ONNX 447)
+ *   "enc0".."enc{n-1}" [C][T][F]            encoder block outputs = skips
+ *   "mid"              [C][T][F]            bottleneck block output (ONNX 571)
+ *   "dec0".."dec{n-1}" [C][T][F]            decoder block outputs
+ *   "output"           [dim_c][F][T]        final output
+ * C, T, F are the sizes at that level. */
+typedef void (*MdxTapFn)(void *ctx, const char *name, const float *t, int c, int h, int w);
+
+/* Working memory for one forward pass, allocated once for a given T. */
+typedef struct {
+    int T;                       /* time frames; multiple of 2^n_scales */
+    float *a, *b;                /* ping-pong buffers, level-0 size: growth * T * F */
+    float *h;                    /* TDF hidden, level-0 size: growth * T * F / bn_factor */
+    float *skip[MDX_MAX_SCALES]; /* encoder outputs, level i: C_i * (T >> i) * (F >> i) */
+    MdxTapFn tap;                /* optional, NULL to disable */
+    void *tap_ctx;
+} MdxState;
+
+/* Returns 0 on success, -1 on bad T or out of memory. */
+int mdx_state_init(MdxState *s, const MdxConfig *cfg, int T);
+void mdx_state_free(MdxState *s);
+
+/* in:  [dim_c][dim_f][T]  (L.re, L.im, R.re, R.im) x freq x time
+ * out: [dim_c][dim_f][T]  may not alias in */
+void mdx_forward(const MdxModel *m, MdxState *s, const float *in, float *out);
+
+/* ------------------------------------------------------------------------- */
 /* kernels
  *
  * Every tensor is a dense row-major float array [C][H][W] (batch 1).

@@ -296,3 +296,129 @@ void mdx_transpose_last2(float *y, const float *x, int C, int H, int Wd) {
             for (int j = 0; j < Wd; j++) yc[(long)j * H + i] = xc[(long)i * Wd + j];
     }
 }
+
+/* ------------------------------------------------------------------------- */
+/* forward pass */
+
+int mdx_state_init(MdxState *s, const MdxConfig *cfg, int T) {
+    memset(s, 0, sizeof(*s));
+    if (T <= 0 || T % (1 << cfg->n_scales)) {
+        fprintf(stderr, "mdx_state_init: T=%d must be a positive multiple of %d\n", T, 1 << cfg->n_scales);
+        return -1;
+    }
+    s->T = T;
+    size_t level0 = (size_t)cfg->growth * T * cfg->dim_f;
+    s->a = malloc(level0 * sizeof(float));
+    s->b = malloc(level0 * sizeof(float));
+    s->h = malloc(level0 / cfg->bn_factor * sizeof(float));
+    int ok = s->a && s->b && s->h;
+    for (uint32_t i = 0; i < cfg->n_scales; i++) {
+        size_t n = (size_t)cfg->growth * (i + 1) * (T >> i) * (cfg->dim_f >> i);
+        s->skip[i] = malloc(n * sizeof(float));
+        ok = ok && s->skip[i];
+    }
+    if (!ok) {
+        fprintf(stderr, "mdx_state_init: out of memory\n");
+        mdx_state_free(s);
+        return -1;
+    }
+    return 0;
+}
+
+void mdx_state_free(MdxState *s) {
+    free(s->a);
+    free(s->b);
+    free(s->h);
+    for (int i = 0; i < MDX_MAX_SCALES; i++) free(s->skip[i]);
+    memset(s, 0, sizeof(*s));
+}
+
+static void tap(MdxState *s, const char *name, const float *t, int c, int h, int w) {
+    if (s->tap) s->tap(s->tap_ctx, name, t, c, h, w);
+}
+
+/* TFC-TDF block on x [C][T][F]. Uses x and tmp as ping-pong buffers and h for
+ * the TDF hidden layer. Returns whichever of x / tmp holds the output; the
+ * other one is free afterwards.
+ *
+ *   repeat n_tfc:  x = relu(conv3x3(x))
+ *   h   = relu(BN(x @ tdf1))          [C][T][F/bn]
+ *   out = relu(BN(h @ tdf2)) + x      [C][T][F]
+ */
+static float *tfc_tdf(const MdxBlock *blk, const MdxConfig *cfg, float *x, float *tmp, float *h, int C, int T,
+                      int F) {
+    long n = (long)C * T * F;
+    int Fh = F / (int)cfg->bn_factor;
+    float *cur = x, *nxt = tmp, *t;
+
+    for (uint32_t i = 0; i < cfg->n_tfc; i++) {
+        mdx_conv3x3(nxt, cur, blk->tfc[i].w, blk->tfc[i].b, C, C, T, F);
+        mdx_relu(nxt, n);
+        t = cur, cur = nxt, nxt = t;
+    }
+    /* cur = TFC output; nxt is free */
+    mdx_matmul_lastdim(h, cur, blk->tdf1, C * T, F, Fh);
+    mdx_batchnorm(h, &blk->tdf1_bn, cfg->bn_eps, C, T * Fh);
+    mdx_relu(h, (long)C * T * Fh);
+
+    mdx_matmul_lastdim(nxt, h, blk->tdf2, C * T, Fh, F);
+    mdx_batchnorm(nxt, &blk->tdf2_bn, cfg->bn_eps, C, T * F);
+    mdx_relu(nxt, n);
+
+    mdx_add(nxt, cur, n); /* residual */
+    return nxt;
+}
+
+void mdx_forward(const MdxModel *m, MdxState *s, const float *in, float *out) {
+    const MdxConfig *cfg = &m->config;
+    const MdxWeights *w = &m->weights;
+    int n_scales = (int)cfg->n_scales, g = (int)cfg->growth;
+    int C = g, T = s->T, F = (int)cfg->dim_f;
+    float *cur, *other;
+
+    /* first conv: [dim_c][F][T] -> [g][F][T], then to [g][T][F] so F is contiguous */
+    mdx_conv1x1(s->a, in, w->first.w, w->first.b, (int)cfg->dim_c, g, F, T);
+    mdx_relu(s->a, (long)g * F * T);
+    tap(s, "first", s->a, g, F, T);
+    mdx_transpose_last2(s->skip[0], s->a, g, F, T);
+
+    /* encoder: block i runs on skip[i] (its input was written there), so its
+     * output stays in skip[i] for the decoder; downsample into the next level */
+    char name[16];
+    for (int i = 0; i < n_scales; i++) {
+        cur = tfc_tdf(&w->enc[i], cfg, s->skip[i], s->a, s->h, C, T, F);
+        if (cur != s->skip[i]) memcpy(s->skip[i], cur, (size_t)C * T * F * sizeof(float)); /* even n_tfc */
+        snprintf(name, sizeof(name), "enc%d", i);
+        tap(s, name, s->skip[i], C, T, F);
+
+        float *dst = i + 1 < n_scales ? s->skip[i + 1] : s->a;
+        mdx_conv2x2_s2(dst, s->skip[i], w->down[i].w, w->down[i].b, C, C + g, T, F);
+        C += g, T /= 2, F /= 2;
+        mdx_relu(dst, (long)C * T * F);
+    }
+
+    /* bottleneck */
+    cur = tfc_tdf(&w->mid, cfg, s->a, s->b, s->h, C, T, F);
+    tap(s, "mid", cur, C, T, F);
+
+    /* decoder */
+    for (int i = 0; i < n_scales; i++) {
+        int lvl = n_scales - 1 - i;
+        other = cur == s->a ? s->b : s->a;
+        mdx_convT2x2_s2(other, cur, w->up[i].w, w->up[i].b, C, C - g, T, F);
+        C -= g, T *= 2, F *= 2;
+        long n = (long)C * T * F;
+        mdx_batchnorm(other, &w->up_bn[i], cfg->bn_eps, C, T * F);
+        mdx_relu(other, n);
+        mdx_mul(other, s->skip[lvl], n); /* multiplicative skip connection */
+        cur = tfc_tdf(&w->dec[i], cfg, other, cur, s->h, C, T, F);
+        snprintf(name, sizeof(name), "dec%d", i);
+        tap(s, name, cur, C, T, F);
+    }
+
+    /* back to [g][F][T], final 1x1 conv to dim_c channels, no activation */
+    other = cur == s->a ? s->b : s->a;
+    mdx_transpose_last2(other, cur, C, T, F);
+    mdx_conv1x1(out, other, w->final.w, w->final.b, g, (int)cfg->dim_c, F, T);
+    tap(s, "output", out, (int)cfg->dim_c, F, T);
+}

@@ -17,10 +17,10 @@ Branch: `claude/chat-session-5b6r4k`
 | M0 | `plain_c/tools/reference.py` numpy forward pass matches ORT | **done** | `4b2681f` |
 | M1 | `tools/export.py` → `kara.bin`; `mdx_load` in C; `tests/test_load.c` | **done** | `8452b6d` |
 | M2 | 9 kernels (naive loops) + unit tests vs numpy | **done** | `f6f7190` |
-| M3 | first_conv + transpose + enc0 TFC_TDF; taps `447`, `466` match | next | |
-| M4 | full encoder + bottleneck; taps through `571` match | todo | |
-| M5 | decoder + final conv; `output` matches < 1e-4 rel | todo | |
-| M6 | `fft.c`, `stft.c` + tests | todo | |
+| M3 | first_conv + transpose + enc0 TFC_TDF; taps `447`, `466` match | **done** | M3_COMMIT |
+| M4 | full encoder + bottleneck; taps through `571` match | **done** (with M3) | M3_COMMIT |
+| M5 | decoder + final conv; `output` matches < 1e-4 rel | **done** (with M3) | M3_COMMIT |
+| M6 | `fft.c`, `stft.c` + tests | next | |
 | M7 | `wav.c`, `main.c`: full C pipeline, SNR > 60 dB vs C++ `separator` | todo | |
 | M8 | `plain_c/Makefile` `test` target complete; README section | todo | |
 | M9 | performance | todo | |
@@ -35,6 +35,11 @@ Branch: `claude/chat-session-5b6r4k`
   Mutation check: flipping the 3×3 kernel, or indexing ConvTranspose weights as
   `[o][i]` instead of `[i][o]`, makes the relevant cases fail (so the tests have teeth).
   Clean under ASan/UBSan.
+- M3–M5 (landed together: the whole `mdx_forward` is ~60 lines, and the test
+  checks every block's output, so the milestones stayed separately verified):
+  `test_forward` at T=32, all 13 taps match ORT. Worst rel err per tap ≤ 2.2e-6
+  inside the net, 4.8e-6 at `output` (tolerance 1e-4). Naive loops: 34 s at T=32
+  (`-O2`, 1 thread). Full-size T=256 run: in progress (see follow-up commit).
 
 ---
 
@@ -88,7 +93,10 @@ python3 tools/reference.py ../models/UVR_MDXNET_KARA_2.onnx   # numpy vs ORT (~3
 | `mdx.c` kernels | `mdx_conv1x1`, `mdx_conv3x3`, `mdx_conv2x2_s2`, `mdx_convT2x2_s2`, `mdx_matmul_lastdim`, `mdx_batchnorm` (in place), `mdx_relu`/`mdx_add`/`mdx_mul` (in place), `mdx_transpose_last2`. Declared in `mdx.h` with their formulas. Naive: loops follow the formula one output element at a time. Sizes passed as `int` (largest tensor 25.2M elements fits), offsets computed in `long`. |
 | `tools/gen_kernel_tests.py` | Random small cases per kernel (incl. 1-sized, odd, cin≠cout, H≠W) → `tests/data/kernels.bin` (committed, 30 KB) using `reference.py` for expected outputs. Record format documented in its docstring. |
 | `tests/test_kernels.c` | Runs each C kernel on each case; pass if max\|diff\|/max\|ref\| < 1e-5. |
-| `Makefile` | `make` builds tests; `make test` builds `kara.bin` if missing and runs tests. Flags: `-O2 -std=c99 -Wall -Wextra -pedantic`. |
+| `mdx.c` forward | `MdxState` (`mdx_state_init(s, cfg, T)`): buffers `a`, `b` (level-0 size), `h` (TDF hidden), `skip[i]`. `tfc_tdf()` ping-pongs between two buffers and **returns the one holding its output**. Encoder blocks run in place on `skip[i]` (downsample writes straight into `skip[i+1]`); bottleneck/decoder alternate `a`/`b`. Optional tap callback `s->tap(ctx, name, t, c, h, w)` after every block (names: `first`, `enc0..4`, `mid`, `dec0..4`, `output`). At T=256 the buffers total ~375 MB. |
+| `tools/dump_acts.py` | Runs ORT with relaxed T (default 32) and the 13 taps as extra outputs; writes `tests/data/acts_T<T>/{input,<tap>}.bin` + `taps.txt` (57 MB at T=32, gitignored). |
+| `tests/test_forward.c` | Runs `mdx_forward` on the dumped input; the tap callback compares each block's output to ORT as it's produced (< 1e-4 rel), printing elapsed time. T is read from the dump. |
+| `Makefile` | `make` builds tests; `make test` creates `kara.bin` and `acts_T32/` if missing (needs Python for those two), then runs all three tests. Flags: `-O2 -std=c99 -Wall -Wextra -pedantic`. |
 
 ---
 
@@ -102,8 +110,9 @@ python3 tools/reference.py ../models/UVR_MDXNET_KARA_2.onnx   # numpy vs ORT (~3
 - Conv BN was folded by the PyTorch exporter; BN is explicit only after TDF
   MatMuls and after ConvTranspose.
 - ConvTranspose weight is `[Cin][Cout][2][2]`; MatMul weight is `[F_in][F_out]`.
-- ONNX input dim T is fixed at 256 in the graph; to test with smaller T in ORT
-  you must relax the input dim (planned for `dump_acts.py`).
+- ONNX input dim T is fixed at 256 in the graph, but the model is fully
+  convolutional in T: relaxing `dim[3]` of input/output (and clearing
+  `value_info`) lets ORT run any T that's a multiple of 32. `dump_acts.py` does this.
 
 ## Gotchas hit so far
 - Don't size things by walking a NULL pointer (UB) — `map_weights` uses offsets.
@@ -112,16 +121,21 @@ python3 tools/reference.py ../models/UVR_MDXNET_KARA_2.onnx   # numpy vs ORT (~3
 
 ---
 
-## Next up: M3 (first_conv + enc0 block vs ORT taps)
+## Next up: M6 (FFT + STFT in C)
 
-1. `tools/dump_acts.py`: load the ONNX model, relax the input's T dim so a small
-   T works (e.g. T=32 — must be divisible by 2^n_scales = 32), add the tap tensors
-   (PLAN.md §7) as extra graph outputs, run ORT on a seeded input, write input +
-   each tap as raw float32 to `tests/data/acts_T32/` (gitignored — too big to
-   commit: tap `466` alone at T=32 is 48·32·2048·4 B = 12.6 MB).
-   Check first that ORT accepts the relaxed dim (the TDF MatMuls only fix F).
-2. `mdx.c`: `MdxState` with the buffers from PLAN.md §6 sized from the config and
-   a T argument; `mdx_forward()` built up block by block, with a debug hook
-   (callback or `tap` pointers) so the test can compare intermediate tensors.
-3. `tests/test_forward.c`: compare taps `447` and `466` (< 1e-4 rel).
-   Note the layouts: `447` is `[48][F][T]` (before the transpose), `466` is `[48][T][F]`.
+Exact behaviour to reproduce is in PLAN.md §5 (table) — read the C++ sources
+`src/DSPCore.cpp` and `src/utils.cpp` too; they are the reference.
+
+1. `plain_c/fft.c/.h`: in-place iterative radix-2 complex FFT for n = power of 2
+   (bit-reversal permutation, then log2(n) butterfly stages; twiddles
+   `e^{-2πik/n}` precomputed once). Inverse = `+` sign, **no 1/n scaling**
+   (matches kiss_fft; the `/n_fft` is applied in ISTFT).
+2. `plain_c/stft.c/.h`: periodic Hann window, reflect pad by n_fft/2, STFT frame
+   (window then FFT), ISTFT frame (IFFT, real part / n_fft, times window),
+   `pack_chunk` / `unpack_chunk` between frames and the model's `[4][2048][256]`
+   tensor — note bins 0–2 are zeroed on pack, and unpack rebuilds bins
+   2049..4095 as conjugates of 1..2047 with DC imag = 0 and Nyquist = 0.
+3. Tests: `tests/test_fft.c` vs a naive O(n²) DFT computed in double (rel err
+   < 1e-4 at n = 4096, plus small n); `tests/test_stft.c` pad → STFT → ISTFT →
+   overlap-add → crop → /1.5 reproduces a random signal (> 90 dB SNR).
+   Optionally also check STFT frames against the C++ `DSPCore` output.
