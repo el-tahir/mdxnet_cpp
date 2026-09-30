@@ -39,3 +39,4 @@ plain_c/test_*
 !plain_c/tests/
 __pycache__/
 plain_c/tests/data/acts_*/
+plain_c/compare_wav

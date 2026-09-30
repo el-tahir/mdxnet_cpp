@@ -5,16 +5,29 @@ LDLIBS = -lm
 ONNX = ../models/UVR_MDXNET_KARA_2.onnx
 MODEL = models/kara.bin
 
-TESTS = test_fft test_stft test_load test_kernels test_forward
+TESTS = test_fft test_stft test_wav test_load test_kernels test_forward
 ACTS = tests/data/acts_T32
 
-all: $(TESTS)
+SRC = main.c mdx.c stft.c fft.c wav.c
+HDR = mdx.h stft.h fft.h wav.h
+
+all: separator compare_wav $(TESTS)
+
+separator: $(SRC) $(HDR)
+	$(CC) $(CFLAGS) -o $@ $(SRC) $(LDLIBS)
+
+# compare two separator outputs: ./compare_wav reference.wav test.wav [min_snr_db]
+compare_wav: tools/compare_wav.c wav.c wav.h
+	$(CC) $(CFLAGS) -o $@ tools/compare_wav.c wav.c $(LDLIBS)
 
 test_fft: tests/test_fft.c fft.c fft.h
 	$(CC) $(CFLAGS) -o $@ tests/test_fft.c fft.c $(LDLIBS)
 
 test_stft: tests/test_stft.c stft.c stft.h fft.c fft.h
 	$(CC) $(CFLAGS) -o $@ tests/test_stft.c stft.c fft.c $(LDLIBS)
+
+test_wav: tests/test_wav.c wav.c wav.h
+	$(CC) $(CFLAGS) -o $@ tests/test_wav.c wav.c $(LDLIBS)
 
 test_load: tests/test_load.c mdx.c mdx.h
 	$(CC) $(CFLAGS) -o $@ tests/test_load.c mdx.c $(LDLIBS)
@@ -38,11 +51,12 @@ $(MODEL): $(ONNX) tools/export.py
 test: $(TESTS) $(MODEL) $(ACTS)/taps.txt
 	./test_fft
 	./test_stft
+	./test_wav
 	./test_load $(MODEL)
 	./test_kernels tests/data/kernels.bin
 	./test_forward $(MODEL) $(ACTS)
 
 clean:
-	rm -f $(TESTS)
+	rm -f separator compare_wav $(TESTS)
 
 .PHONY: all test clean
