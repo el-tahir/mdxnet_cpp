@@ -21,7 +21,7 @@ Branch: `claude/chat-session-5b6r4k`
 | M4 | full encoder + bottleneck; taps through `571` match | **done** (with M3) | `7cd6f52` |
 | M5 | decoder + final conv; `output` matches < 1e-4 rel | **done** (with M3) | `7cd6f52` |
 | M6 | `fft.c`, `stft.c` + tests | **done** | `b2d71de` |
-| M7 | `wav.c`, `main.c`: full C pipeline, SNR > 60 dB vs C++ `separator` | **done** | `5274de0`, M7_COMMIT |
+| M7 | `wav.c`, `main.c`: full C pipeline, SNR > 60 dB vs C++ `separator` | **done** | `5274de0`, `cfba5ef` |
 | M8 | `plain_c/Makefile` `test` target complete; README section | next | |
 | M9 | performance | todo | |
 
