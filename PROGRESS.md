@@ -22,8 +22,8 @@ Branch: `claude/chat-session-5b6r4k`
 | M5 | decoder + final conv; `output` matches < 1e-4 rel | **done** (with M3) | `7cd6f52` |
 | M6 | `fft.c`, `stft.c` + tests | **done** | `b2d71de` |
 | M7 | `wav.c`, `main.c`: full C pipeline, SNR > 60 dB vs C++ `separator` | **done** | `5274de0`, `cfba5ef` |
-| M8 | `plain_c/Makefile` `test` target complete; README section | next | |
-| M9 | performance | todo | |
+| M8 | `plain_c/Makefile` `test` target complete; README section | **done** | `2ff2fd2` |
+| M9 | performance | next | |
 
 ### Verified results so far
 - M0: reference vs ORT on seeded input `[1,4,2048,256]` (`np.random.default_rng(0)`, ×0.5):
@@ -57,6 +57,11 @@ Branch: `claude/chat-session-5b6r4k`
   **SNR 116.2 dB**, max |diff| 4.2e-7 (peak 0.71), noise-gate decisions identical
   (0 samples zeroed in only one file), temp file cleaned up. C++: 10 s total;
   C (naive): 681 s (~335 s per 256-frame chunk). `test_wav`: 7/7.
+- M8: `plain_c/README.md` + a short section in the top-level `README.md`.
+  Fresh `git clone` + the ONNX file → `cd plain_c && make && make test`: builds
+  with zero warnings (gcc, `-std=c99 -Wall -Wextra -pedantic`), exports
+  `kara.bin` and dumps `acts_T32` itself, all 6 tests pass. Also builds warning-free
+  with clang (`make CC=clang`).
 
 ---
 
@@ -170,21 +175,23 @@ cd plain_c && make && ./separator /tmp/clip.mp3 /tmp/out_c.wav   # ~11 min with 
 
 ---
 
-## Next up: M8 (packaging), then M9 (performance)
+## Next up: M9 (performance)
 
-M8:
-1. `plain_c/README.md`: what it is, build (`make`), one-time model export
-   (`python3 tools/export.py`), usage, tests, and a short tour of the forward pass
-   (point at `tools/reference.py` and `mdx.c`).
-2. Short `plain_c/` section in the top-level `README.md` linking to it (the only
-   edit outside `plain_c/`, allowed: docs).
-3. Check `make clean && make && make test` from a clean checkout (after
-   exporting `kara.bin` and dumping `acts_T32`) works with only a C compiler for
-   the C parts.
+Baseline: naive `mdx_forward` ≈ 335 s per 256-frame chunk (gcc `-O2`, 1 thread,
+this 4-core box); ORT ≈ 4 s. FLOPs per chunk ≈ 472 G: conv3x3 81%, TDF matmuls
+14%, down/up convs 5% (PLAN.md §9). So the naive code runs at ~1.4 GFLOP/s.
 
-M9 (the big one): the naive forward is ~335 s per chunk vs ORT's ~4 s. conv3x3 is
-81% of FLOPs. Keep the naive kernels as the reference (e.g. behind a flag or in
-the tests) and add fast ones: loop reordering so the innermost loop runs over
-contiguous W with `-O3 -march=native` auto-vectorisation first, then OpenMP over
-output channels, then im2col + blocked SGEMM. Every step must keep `test_forward`
-(T=32) passing and the M7 parity (> 60 dB) intact.
+Approach, one measurable step at a time, each keeping `make test` green and
+re-checking M7 parity (> 60 dB vs the C++ output) at the end:
+1. Add a benchmark (`tests/bench_forward.c` or a flag on test_forward) that times
+   each kernel type over one T=256 forward pass, so each step shows where time goes.
+2. Keep the naive kernels as the readable reference (`mdx_conv3x3_ref` etc.);
+   test_kernels checks fast vs reference on random cases, including edge sizes.
+3. conv3x3: reorder so the innermost loop runs over contiguous W with the 3×3
+   taps and input channels outside (accumulate whole output rows), then
+   `-O3 -march=native` so gcc vectorises it. Then register/cache blocking over
+   output channels, or im2col + a blocked SGEMM shared with the TDF matmuls.
+4. matmul_lastdim: loop order r, f, j (contiguous W rows) → vectorises.
+5. OpenMP `#pragma omp parallel for` over output channels / rows; must still
+   build and pass without `-fopenmp`.
+Report GFLOP/s per step in this file.
