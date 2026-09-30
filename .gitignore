@@ -33,3 +33,7 @@ onnxruntime/
 *.flac
 *.mp3
 *.wav
+
+# plain_c build outputs
+plain_c/test_*
+!plain_c/tests/
