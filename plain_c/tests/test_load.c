@@ -57,7 +57,7 @@ static void check(const char *name, const float *t, unsigned long long n) {
 
 static void check_conv(const char *name, const MdxConv *c, unsigned long long cout, unsigned long long cin,
                        unsigned long long k) {
-    char buf[128];
+    char buf[256];
     snprintf(buf, sizeof(buf), "%s.w", name);
     check(buf, c->w, cout * cin * k * k);
     snprintf(buf, sizeof(buf), "%s.b", name);
@@ -65,7 +65,7 @@ static void check_conv(const char *name, const MdxConv *c, unsigned long long co
 }
 
 static void check_bn(const char *name, const MdxBN *bn, unsigned long long ch) {
-    char buf[128];
+    char buf[256];
     const float *p[4] = {bn->scale, bn->bias, bn->mean, bn->var};
     const char *s[4] = {"scale", "bias", "mean", "var"};
     for (int i = 0; i < 4; i++) {

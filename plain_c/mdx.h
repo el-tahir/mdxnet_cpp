@@ -71,6 +71,10 @@ void mdx_free(MdxModel *m);
  * C, T, F are the sizes at that level. */
 typedef void (*MdxTapFn)(void *ctx, const char *name, const float *t, int c, int h, int w);
 
+/* wall-clock seconds spent per kernel type, accumulated over mdx_forward calls */
+enum { MDX_PROF_CONV3X3, MDX_PROF_TDF, MDX_PROF_DOWN, MDX_PROF_UP, MDX_PROF_CONV1X1, MDX_PROF_ELEMWISE, MDX_PROF_N };
+extern const char *const mdx_prof_names[MDX_PROF_N];
+
 /* Working memory for one forward pass, allocated once for a given T. */
 typedef struct {
     int T;                       /* time frames; multiple of 2^n_scales */
@@ -79,6 +83,8 @@ typedef struct {
     float *skip[MDX_MAX_SCALES]; /* encoder outputs, level i: C_i * (T >> i) * (F >> i) */
     MdxTapFn tap;                /* optional, NULL to disable */
     void *tap_ctx;
+    int reference;               /* 1: use the naive *_ref kernels */
+    double prof[MDX_PROF_N];     /* seconds per kernel type */
 } MdxState;
 
 /* Returns 0 on success, -1 on bad T or out of memory. */
@@ -95,22 +101,34 @@ void mdx_forward(const MdxModel *m, MdxState *s, const float *in, float *out);
  * Every tensor is a dense row-major float array [C][H][W] (batch 1).
  * y is the output, x the input; y and x never alias unless noted "in place".
  * Formulas are in PLAN.md section 2 and in the docstrings of tools/reference.py.
+ *
+ * The *_ref kernels (mdx.c) are the readable reference: one loop nest per
+ * formula, one output element at a time. The same kernels without _ref
+ * (kernels.c) compute the same thing, reordered and blocked for speed; the
+ * tests check them against each other and against numpy.
  */
 
 /* y[o,h,w] = b[o] + sum_i W[o,i] x[i,h,w]                        W [cout][cin][1][1] */
-void mdx_conv1x1(float *y, const float *x, const float *W, const float *b, int cin, int cout, int H, int Wd);
+void mdx_conv1x1_ref(float *y, const float *x, const float *W, const float *b, int cin, int cout, int H, int Wd);
 
 /* y[o,h,w] = b[o] + sum_i,ky,kx W[o,i,ky,kx] x[i,h+ky-1,w+kx-1], zero outside   W [cout][cin][3][3] */
-void mdx_conv3x3(float *y, const float *x, const float *W, const float *b, int cin, int cout, int H, int Wd);
+void mdx_conv3x3_ref(float *y, const float *x, const float *W, const float *b, int cin, int cout, int H, int Wd);
 
 /* y[o,h,w] = b[o] + sum_i,ky,kx W[o,i,ky,kx] x[i,2h+ky,2w+kx]; x is [cin][H][Wd], y [cout][H/2][Wd/2]   W [cout][cin][2][2] */
-void mdx_conv2x2_s2(float *y, const float *x, const float *W, const float *b, int cin, int cout, int H, int Wd);
+void mdx_conv2x2_s2_ref(float *y, const float *x, const float *W, const float *b, int cin, int cout, int H, int Wd);
 
 /* y[o,2h+ky,2w+kx] = b[o] + sum_i W[i,o,ky,kx] x[i,h,w]; x is [cin][H][Wd], y [cout][2H][2Wd]   W [cin][cout][2][2] */
-void mdx_convT2x2_s2(float *y, const float *x, const float *W, const float *b, int cin, int cout, int H, int Wd);
+void mdx_convT2x2_s2_ref(float *y, const float *x, const float *W, const float *b, int cin, int cout, int H, int Wd);
 
 /* y[r,j] = sum_f x[r,f] W[f,j]; x is [rows][fin], y [rows][fout]   W [fin][fout]
  * (rows = C*T: the Linear acts on the last axis only) */
+void mdx_matmul_lastdim_ref(float *y, const float *x, const float *W, int rows, int fin, int fout);
+
+/* fast versions, same signatures and results (up to float summation order) */
+void mdx_conv1x1(float *y, const float *x, const float *W, const float *b, int cin, int cout, int H, int Wd);
+void mdx_conv3x3(float *y, const float *x, const float *W, const float *b, int cin, int cout, int H, int Wd);
+void mdx_conv2x2_s2(float *y, const float *x, const float *W, const float *b, int cin, int cout, int H, int Wd);
+void mdx_convT2x2_s2(float *y, const float *x, const float *W, const float *b, int cin, int cout, int H, int Wd);
 void mdx_matmul_lastdim(float *y, const float *x, const float *W, int rows, int fin, int fout);
 
 /* in place: x[c,i] = (x[c,i] - mean[c]) / sqrt(var[c] + eps) * scale[c] + bias[c], i over hw */

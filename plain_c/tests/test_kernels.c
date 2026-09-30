@@ -1,4 +1,5 @@
-/* M2 check: every kernel against the numpy reference on small random cases.
+/* Every kernel against the numpy reference on small random cases, both the
+ * naive *_ref kernels (mdx.c) and the fast ones (kernels.c).
  *
  * Cases come from tests/data/kernels.bin (tools/gen_kernel_tests.py): inputs and
  * expected output per case. Pass if max|c - ref| / max|ref| < 1e-5.
@@ -65,6 +66,43 @@ static int compare(const Case *c, const float *got, long n, double *rel_out) {
     return *rel_out < TOL;
 }
 
+/* runs the case's op into y; fast selects kernels.c over the *_ref kernels.
+ * Returns 0 for an unknown op. */
+static int run(const Case *c, float *y, int fast) {
+    const int32_t *d = c->d;
+    float *const *a = c->a;
+    long out_n = c->count[c->n - 1];
+    if (!strcmp(c->op, "conv1x1")) {
+        (fast ? mdx_conv1x1 : mdx_conv1x1_ref)(y, a[0], a[1], a[2], d[0], d[1], d[2], d[3]);
+    } else if (!strcmp(c->op, "conv3x3")) {
+        (fast ? mdx_conv3x3 : mdx_conv3x3_ref)(y, a[0], a[1], a[2], d[0], d[1], d[2], d[3]);
+    } else if (!strcmp(c->op, "conv2x2_s2")) {
+        (fast ? mdx_conv2x2_s2 : mdx_conv2x2_s2_ref)(y, a[0], a[1], a[2], d[0], d[1], d[2], d[3]);
+    } else if (!strcmp(c->op, "convT2x2_s2")) {
+        (fast ? mdx_convT2x2_s2 : mdx_convT2x2_s2_ref)(y, a[0], a[1], a[2], d[0], d[1], d[2], d[3]);
+    } else if (!strcmp(c->op, "matmul_lastdim")) {
+        (fast ? mdx_matmul_lastdim : mdx_matmul_lastdim_ref)(y, a[0], a[1], d[0], d[1], d[2]);
+    } else if (!strcmp(c->op, "batchnorm")) { /* single version: in place */
+        MdxBN bn = {a[1], a[2], a[3], a[4]};
+        memcpy(y, a[0], (size_t)out_n * sizeof(float));
+        mdx_batchnorm(y, &bn, 1e-5f, d[0], d[1] * d[2]);
+    } else if (!strcmp(c->op, "relu")) {
+        memcpy(y, a[0], (size_t)out_n * sizeof(float));
+        mdx_relu(y, d[0]);
+    } else if (!strcmp(c->op, "add")) {
+        memcpy(y, a[0], (size_t)out_n * sizeof(float));
+        mdx_add(y, a[1], d[0]);
+    } else if (!strcmp(c->op, "mul")) {
+        memcpy(y, a[0], (size_t)out_n * sizeof(float));
+        mdx_mul(y, a[1], d[0]);
+    } else if (!strcmp(c->op, "transpose_last2")) {
+        mdx_transpose_last2(y, a[0], d[0], d[1], d[2]);
+    } else {
+        return 0;
+    }
+    return 1;
+}
+
 int main(int argc, char **argv) {
     const char *path = argc > 1 ? argv[1] : "tests/data/kernels.bin";
     FILE *f = fopen(path, "rb");
@@ -76,47 +114,17 @@ int main(int argc, char **argv) {
     int n_cases = 0, n_failed = 0;
     Case c;
     while (read_case(f, &c)) {
-        const int32_t *d = c.d;
-        float **a = c.a;
         long out_n = c.count[c.n - 1];
         float *y = malloc((size_t)out_n * sizeof(float) + 1);
-        int known = 1;
-
-        if (!strcmp(c.op, "conv1x1")) {
-            mdx_conv1x1(y, a[0], a[1], a[2], d[0], d[1], d[2], d[3]);
-        } else if (!strcmp(c.op, "conv3x3")) {
-            mdx_conv3x3(y, a[0], a[1], a[2], d[0], d[1], d[2], d[3]);
-        } else if (!strcmp(c.op, "conv2x2_s2")) {
-            mdx_conv2x2_s2(y, a[0], a[1], a[2], d[0], d[1], d[2], d[3]);
-        } else if (!strcmp(c.op, "convT2x2_s2")) {
-            mdx_convT2x2_s2(y, a[0], a[1], a[2], d[0], d[1], d[2], d[3]);
-        } else if (!strcmp(c.op, "matmul_lastdim")) {
-            mdx_matmul_lastdim(y, a[0], a[1], d[0], d[1], d[2]);
-        } else if (!strcmp(c.op, "batchnorm")) {
-            MdxBN bn = {a[1], a[2], a[3], a[4]};
-            memcpy(y, a[0], (size_t)out_n * sizeof(float)); /* in place */
-            mdx_batchnorm(y, &bn, 1e-5f, d[0], d[1] * d[2]);
-        } else if (!strcmp(c.op, "relu")) {
-            memcpy(y, a[0], (size_t)out_n * sizeof(float));
-            mdx_relu(y, d[0]);
-        } else if (!strcmp(c.op, "add")) {
-            memcpy(y, a[0], (size_t)out_n * sizeof(float));
-            mdx_add(y, a[1], d[0]);
-        } else if (!strcmp(c.op, "mul")) {
-            memcpy(y, a[0], (size_t)out_n * sizeof(float));
-            mdx_mul(y, a[1], d[0]);
-        } else if (!strcmp(c.op, "transpose_last2")) {
-            mdx_transpose_last2(y, a[0], d[0], d[1], d[2]);
-        } else {
-            known = 0;
+        for (int fast = 0; fast < 2; fast++) {
+            int known = run(&c, y, fast);
+            n_cases++;
+            double rel = 0;
+            int ok = known && compare(&c, y, out_n, &rel);
+            if (!ok) n_failed++;
+            printf("%-4s %-4s %-16s dims [%d %d %d %d]  rel err %.2e%s\n", ok ? "ok" : "FAIL", fast ? "fast" : "ref",
+                   c.op, c.d[0], c.d[1], c.d[2], c.d[3], rel, known ? "" : "  (unknown op)");
         }
-
-        n_cases++;
-        double rel = 0;
-        int ok = known && compare(&c, y, out_n, &rel);
-        if (!ok) n_failed++;
-        printf("%-4s %-16s dims [%d %d %d %d]  rel err %.2e%s\n", ok ? "ok" : "FAIL", c.op, d[0], d[1], d[2], d[3],
-               rel, known ? "" : "  (unknown op)");
         free(y);
         free_case(&c);
     }

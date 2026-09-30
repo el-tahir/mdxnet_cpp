@@ -40,19 +40,23 @@ for cin, cout, H, W in [(1, 1, 1, 1), (3, 5, 4, 7), (8, 2, 6, 3), (4, 4, 9, 11)]
     x, w, b = randn(cin, H, W), randn(cout, cin, 1, 1), randn(cout)
     add("conv1x1", [cin, cout, H, W], x, w, b, ref.conv1x1(x, w, b))
 
-for cin, cout, H, W in [(1, 1, 1, 1), (1, 1, 3, 3), (3, 5, 4, 7), (8, 2, 6, 3), (4, 4, 9, 11)]:
+# the fast conv3x3 tiles 4 output channels x 32 columns: include widths that are
+# multiples of 32 (fast path), channel counts that aren't multiples of 4 (tail
+# tile), a single row, and one tile wide (both column edges in one tile)
+for cin, cout, H, W in [(1, 1, 1, 1), (1, 1, 3, 3), (3, 5, 4, 7), (8, 2, 6, 3), (4, 4, 9, 11),
+                        (3, 4, 1, 32), (5, 6, 3, 64), (2, 9, 5, 96), (7, 8, 2, 128)]:
     x, w, b = randn(cin, H, W), randn(cout, cin, 3, 3), randn(cout)
     add("conv3x3", [cin, cout, H, W], x, w, b, ref.conv3x3(x, w, b))
 
-for cin, cout, H, W in [(1, 1, 2, 2), (3, 5, 4, 8), (6, 9, 8, 2), (4, 4, 10, 6)]:
+for cin, cout, H, W in [(1, 1, 2, 2), (3, 5, 4, 8), (6, 9, 8, 2), (4, 4, 10, 6), (3, 5, 4, 64)]:
     x, w, b = randn(cin, H, W), randn(cout, cin, 2, 2), randn(cout)
     add("conv2x2_s2", [cin, cout, H, W], x, w, b, ref.conv2x2_s2(x, w, b))
 
-for cin, cout, H, W in [(1, 1, 1, 1), (5, 3, 2, 4), (9, 6, 4, 1), (4, 4, 5, 3)]:
+for cin, cout, H, W in [(1, 1, 1, 1), (5, 3, 2, 4), (9, 6, 4, 1), (4, 4, 5, 3), (5, 3, 2, 32)]:
     x, w, b = randn(cin, H, W), randn(cin, cout, 2, 2), randn(cout)  # ConvTranspose: [cin][cout]
     add("convT2x2_s2", [cin, cout, H, W], x, w, b, ref.convT2x2_s2(x, w, b))
 
-for C, T, fin, fout in [(1, 1, 1, 1), (3, 4, 16, 2), (2, 5, 2, 16), (4, 3, 13, 7)]:
+for C, T, fin, fout in [(1, 1, 1, 1), (3, 4, 16, 2), (2, 5, 2, 16), (4, 3, 13, 7), (3, 3, 64, 8), (2, 3, 8, 64)]:
     x, w = randn(C, T, fin), randn(fin, fout)
     add("matmul_lastdim", [C * T, fin, fout], x, w, ref.matmul_lastdim(x, w))
 

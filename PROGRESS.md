@@ -23,7 +23,7 @@ Branch: `claude/chat-session-5b6r4k`
 | M6 | `fft.c`, `stft.c` + tests | **done** | `b2d71de` |
 | M7 | `wav.c`, `main.c`: full C pipeline, SNR > 60 dB vs C++ `separator` | **done** | `5274de0`, `cfba5ef` |
 | M8 | `plain_c/Makefile` `test` target complete; README section | **done** | `2ff2fd2` |
-| M9 | performance | next | |
+| M9 | performance | **done** (first pass) | M9_COMMIT |
 
 ### Verified results so far
 - M0: reference vs ORT on seeded input `[1,4,2048,256]` (`np.random.default_rng(0)`, ×0.5):
@@ -62,6 +62,24 @@ Branch: `claude/chat-session-5b6r4k`
   with zero warnings (gcc, `-std=c99 -Wall -Wextra -pedantic`), exports
   `kara.bin` and dumps `acts_T32` itself, all 6 tests pass. Also builds warning-free
   with clang (`make CC=clang`).
+- M9: `bench_forward` (T=256, 4 cores, this Xeon @ 2.1 GHz with AVX-512):
+
+  | step | s / chunk | conv3x3 GFLOP/s | overall GFLOP/s |
+  |---|---|---|---|
+  | naive `*_ref` kernels, `-O2`, 1 thread | ~335 | ~1.4 | ~1.4 |
+  | `kernels.c` tiled conv3x3 (4 out-ch × 32 cols) + reordered others, `-O3 -march=native -fopenmp` | 6.9 | 93 | 68 |
+  | + elementwise kernels parallel, tiled transpose | 6.0 | 97 | 78 |
+  | + `-mprefer-vector-width=512`, tile 16 out-ch × 64 cols (swept 4–16 × 16–64) | **3.5–3.7** | **~175** | **~130** |
+  | (ONNX Runtime, same box) | ~2.6–4.4 | | ~110–180 |
+
+  Per chunk now: conv3x3 ~2.2 s, TDF matmul ~0.75 s, down/up ~0.6 s, rest ~0.3 s.
+  `make test` all green with the fast kernels (test_kernels runs every case
+  through both `_ref` and fast kernels: 88/88; test_forward T=32 13/13, output
+  4.9e-6). T=256 taps: 13/13, output 5.4e-6. ASan/UBSan clean with OpenMP.
+  Portable build (`make OPT=-O2`, no OpenMP/-march) passes too, zero warnings.
+  End to end: 10 s clip in **12 s wall** (was 681 s; C++/ORT: 10 s), SNR vs C++
+  116.3 dB, headers + gate identical. Two runs are bit-identical (each output
+  element is computed by one thread in a fixed order).
 
 ---
 
@@ -138,9 +156,12 @@ cd plain_c && make && ./separator /tmp/clip.mp3 /tmp/out_c.wav   # ~11 min with 
 | `tools/compare_wav.c` | `compare_wav ref.wav test.wav [min_snr]`: header match, SNR, max diff, bit-identical count, gate mismatches. Built by `make`. |
 | `tools/make_test_clip.py` | Deterministic synthetic 10 s clip (chords, centred "voice", drums, silent gap). |
 | `tests/test_wav.c` | Hand-written WAV files: pcm16 mono/stereo, write header patching, float round trip, rejects. |
+| `kernels.c` | Fast `mdx_conv3x3` (tiles of `OB`=16 output channels × one row × `VW`=64 columns kept in registers/L1 while looping over input channels and the 9 taps; inner loop is scalar-weight × 64 contiguous inputs; falls back to `_ref` if the width isn't a multiple of 64), `mdx_matmul_lastdim` (RB=4 rows share each W row), `mdx_conv1x1`/`mdx_conv2x2_s2`/`mdx_convT2x2_s2` (loops reordered for contiguous inner loops). All `#pragma omp parallel for`. `OB`, `VW`, `RB` overridable with `-D` for tuning. |
+| `mdx.c` forward (M9 additions) | Naive kernels renamed `mdx_*_ref`; `Kernels` function-pointer table picks `FAST` or `REF` (`MdxState.reference = 1`). `PROF(s, kind, ...)` accumulates wall time per kernel type into `MdxState.prof[]` (`omp_get_wtime` with OpenMP, else `clock`). Elementwise kernels (single version) have OpenMP pragmas; transpose is 32×32 tiled. |
+| `tests/bench_forward.c` | `./bench_forward [T] [--ref]`: one forward pass, seconds + GFLOP/s per kernel type. |
 | `tools/dump_acts.py` | Runs ORT with relaxed T (default 32) and the 13 taps as extra outputs; writes `tests/data/acts_T<T>/{input,<tap>}.bin` + `taps.txt` (57 MB at T=32, gitignored). |
 | `tests/test_forward.c` | Runs `mdx_forward` on the dumped input; the tap callback compares each block's output to ORT as it's produced (< 1e-4 rel), printing elapsed time. T is read from the dump. |
-| `Makefile` | `make` builds tests; `make test` creates `kara.bin` and `acts_T32/` if missing (needs Python for those two), then runs all three tests. Flags: `-O2 -std=c99 -Wall -Wextra -pedantic`. |
+| `Makefile` | `make` builds `separator`, `compare_wav`, `bench_forward`, tests; `make test` creates `kara.bin` and `acts_T32/` if missing (needs Python for those two), then runs all six tests. `CFLAGS = -std=c99 -Wall -Wextra -pedantic -Wno-unknown-pragmas`, `OPT ?= -O3 -march=native [-mprefer-vector-width=512 if accepted] -fopenmp`; `make OPT=-O2` = portable single-threaded build. |
 
 ---
 
@@ -165,6 +186,10 @@ cd plain_c && make && ./separator /tmp/clip.mp3 /tmp/out_c.wav   # ~11 min with 
 - C++ Hann is `0.5f * (1.0f - std::cos(2.0f * M_PI * n / n_fft))`: `M_PI` is a
   double, so it's evaluated in **double** and rounded once. Match that, not a
   float `cosf` version.
+- Time with wall clock (`omp_get_wtime`), never `clock()`, once OpenMP is on:
+  `clock()` sums CPU time over threads (showed 13.5 s for a 3.5 s chunk).
+- gcc with `-march=native` on this AVX-512 Xeon still prefers 256-bit vectors;
+  `-mprefer-vector-width=512` was worth ~1.6× on conv3x3.
 - `/usr/bin/time` isn't installed here; time runs with `date +%s`.
 - The C++ `build/separator` resolves `models/UVR_MDXNET_KARA_2.onnx` relative to
   the cwd — run it from the repo root. `plain_c/separator` defaults to
@@ -175,23 +200,16 @@ cd plain_c && make && ./separator /tmp/clip.mp3 /tmp/out_c.wav   # ~11 min with 
 
 ---
 
-## Next up: M9 (performance)
+## Next up (all milestones in PLAN.md done)
 
-Baseline: naive `mdx_forward` ≈ 335 s per 256-frame chunk (gcc `-O2`, 1 thread,
-this 4-core box); ORT ≈ 4 s. FLOPs per chunk ≈ 472 G: conv3x3 81%, TDF matmuls
-14%, down/up convs 5% (PLAN.md §9). So the naive code runs at ~1.4 GFLOP/s.
-
-Approach, one measurable step at a time, each keeping `make test` green and
-re-checking M7 parity (> 60 dB vs the C++ output) at the end:
-1. Add a benchmark (`tests/bench_forward.c` or a flag on test_forward) that times
-   each kernel type over one T=256 forward pass, so each step shows where time goes.
-2. Keep the naive kernels as the readable reference (`mdx_conv3x3_ref` etc.);
-   test_kernels checks fast vs reference on random cases, including edge sizes.
-3. conv3x3: reorder so the innermost loop runs over contiguous W with the 3×3
-   taps and input channels outside (accumulate whole output rows), then
-   `-O3 -march=native` so gcc vectorises it. Then register/cache blocking over
-   output channels, or im2col + a blocked SGEMM shared with the TDF matmuls.
-4. matmul_lastdim: loop order r, f, j (contiguous W rows) → vectorises.
-5. OpenMP `#pragma omp parallel for` over output channels / rows; must still
-   build and pass without `-fopenmp`.
-Report GFLOP/s per step in this file.
+The plan is complete. Candidate follow-ups, none started — ask the user first:
+- Fix the carried-over C++ quirks now that parity is proven (PLAN.md §5): edge
+  attenuation from the framing, O(N·4096) noise gate, 44-byte-only WAV reader.
+  Each changes output vs the C++ reference, so do them one at a time and
+  re-baseline the parity check deliberately.
+- More speed: conv3x3 is ~175 GFLOP/s of a much higher AVX-512 peak; next steps
+  would be packing weights per tile, im2col + blocked SGEMM, or Winograd F(2,3).
+  TDF matmul (~90 GFLOP/s) could skip zero inputs after ReLU. STFT/ISTFT and the
+  noise gate are still single-threaded.
+- Other MDX-Net models (dim_f 3072 etc.): `export.py` + header already carry the
+  hyperparameters; main.c assumes n_fft 4096 / hop 1024 / F ≤ n_fft/2.

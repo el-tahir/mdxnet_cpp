@@ -40,3 +40,4 @@ plain_c/test_*
 __pycache__/
 plain_c/tests/data/acts_*/
 plain_c/compare_wav
+plain_c/bench_forward

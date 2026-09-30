@@ -272,6 +272,10 @@ ORT on this 4-core box: 4.4 s/chunk (~2.3 min/song).
 conv3x3 is 81% of FLOPs, so it's the only kernel that matters for speed; the
 TDF matmuls reuse the same SGEMM. Everything stays dependency-free (no BLAS).
 
+**Outcome:** the direct tiled conv3x3 with `-O3 -march=native
+-mprefer-vector-width=512 -fopenmp` already reached ~175 GFLOP/s and ~3.5 s per
+chunk (on par with ORT) without im2col/SGEMM; see PROGRESS.md.
+
 ---
 
 ## 10. Open decisions

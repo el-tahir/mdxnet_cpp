@@ -32,10 +32,12 @@ If `ffmpeg` is on the PATH it is run once at the start to decode any input to a
 44.1 kHz 16-bit stereo WAV. Without it the input must already be a 44.1 kHz WAV
 (16-bit PCM or 32-bit float, mono or stereo). Output is 32-bit float stereo WAV.
 
-**Speed:** the kernels are currently naive loops, written straight from the
-formulas. That's about 5.5 min per 256-frame chunk (about 6 s of audio) on one
-core, against about 4 s for ONNX Runtime. Optimizing them is the next milestone
-(see `../PROGRESS.md`).
+**Speed:** about 3.5 s per 256-frame chunk (about 6 s of audio) on 4 cores with
+AVX-512, which is on par with ONNX Runtime on the same machine. A 10 s clip takes
+12 s end to end. The fast kernels live in `kernels.c`. The naive reference
+kernels (`mdx_*_ref` in `mdx.c`) are kept as the readable version and checked
+against the fast ones: `./bench_forward --ref` runs the forward pass with them
+(about 5.5 min per chunk). `make OPT=-O2` gives a portable single-threaded build.
 
 ## What happens to a song
 
@@ -74,7 +76,8 @@ full trace of the ONNX graph.
 | File | |
 |---|---|
 | `main.c` | CLI and the separation pipeline |
-| `mdx.c`, `mdx.h` | weight loading, kernels, forward pass |
+| `mdx.c`, `mdx.h` | weight loading, reference kernels (`*_ref`), elementwise kernels, forward pass |
+| `kernels.c` | fast conv/matmul kernels (tiled, vectorisable, OpenMP) |
 | `fft.c`, `fft.h` | radix-2 complex FFT |
 | `stft.c`, `stft.h` | window, padding, STFT/ISTFT frames, frames ↔ model tensor |
 | `wav.c`, `wav.h` | WAV read/write |
@@ -82,6 +85,7 @@ full trace of the ONNX graph.
 | `tools/export.py` | ONNX → `models/kara.bin` (64-byte header + raw float32 weights) |
 | `tools/dump_acts.py` | saves ONNX Runtime's per-block activations for `test_forward` |
 | `tools/gen_kernel_tests.py` | regenerates `tests/data/kernels.bin` |
+| `tests/bench_forward.c` | time per kernel type and GFLOP/s for one forward pass |
 | `tools/compare_wav.c` | SNR / header / gate comparison of two output WAVs |
 | `tools/make_test_clip.py` | the synthetic clip used for the parity check |
 | `tests/` | see below |
@@ -98,7 +102,7 @@ make test     # first run also creates models/kara.bin and tests/data/acts_T32 (
 | `test_stft` | window, padding, STFT→ISTFT→overlap-add gain at every sample, pack/unpack layout |
 | `test_wav` | WAV read/write/reject cases |
 | `test_load` | all 220 weight tensors land in the right struct field |
-| `test_kernels` | each kernel against numpy on small random cases |
+| `test_kernels` | each kernel, reference and fast, against numpy on small random cases |
 | `test_forward` | the full forward pass against ONNX Runtime, block by block (13 checkpoints, T=32) |
 
 End to end, `./compare_wav` of this separator against the C++ `build/separator`

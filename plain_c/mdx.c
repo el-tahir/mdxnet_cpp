@@ -4,6 +4,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 /* ------------------------------------------------------------------------- */
 /* weight loading
@@ -176,14 +181,13 @@ void mdx_free(MdxModel *m) {
 }
 
 /* ------------------------------------------------------------------------- */
-/* kernels
+/* reference kernels
  *
  * Deliberately naive: the loops follow the formulas in mdx.h one to one, output
- * element by output element. Speed comes later (PLAN.md M9) without changing
- * these reference versions.
+ * element by output element. The fast versions live in kernels.c.
  */
 
-void mdx_conv1x1(float *y, const float *x, const float *W, const float *b, int cin, int cout, int H, int Wd) {
+void mdx_conv1x1_ref(float *y, const float *x, const float *W, const float *b, int cin, int cout, int H, int Wd) {
     long hw = (long)H * Wd;
     for (int o = 0; o < cout; o++) {
         for (long p = 0; p < hw; p++) {
@@ -194,7 +198,7 @@ void mdx_conv1x1(float *y, const float *x, const float *W, const float *b, int c
     }
 }
 
-void mdx_conv3x3(float *y, const float *x, const float *W, const float *b, int cin, int cout, int H, int Wd) {
+void mdx_conv3x3_ref(float *y, const float *x, const float *W, const float *b, int cin, int cout, int H, int Wd) {
     long hw = (long)H * Wd;
     for (int o = 0; o < cout; o++) {
         for (int h = 0; h < H; h++) {
@@ -219,7 +223,7 @@ void mdx_conv3x3(float *y, const float *x, const float *W, const float *b, int c
     }
 }
 
-void mdx_conv2x2_s2(float *y, const float *x, const float *W, const float *b, int cin, int cout, int H, int Wd) {
+void mdx_conv2x2_s2_ref(float *y, const float *x, const float *W, const float *b, int cin, int cout, int H, int Wd) {
     int Ho = H / 2, Wo = Wd / 2;
     long hw = (long)H * Wd;
     for (int o = 0; o < cout; o++) {
@@ -239,7 +243,7 @@ void mdx_conv2x2_s2(float *y, const float *x, const float *W, const float *b, in
     }
 }
 
-void mdx_convT2x2_s2(float *y, const float *x, const float *W, const float *b, int cin, int cout, int H, int Wd) {
+void mdx_convT2x2_s2_ref(float *y, const float *x, const float *W, const float *b, int cin, int cout, int H, int Wd) {
     /* stride == kernel size, so every output pixel (2h+ky, 2w+kx) receives exactly
      * one kernel tap (ky,kx) from exactly one input pixel (h,w) per input channel */
     int Ho = 2 * H, Wo = 2 * Wd;
@@ -257,7 +261,7 @@ void mdx_convT2x2_s2(float *y, const float *x, const float *W, const float *b, i
     }
 }
 
-void mdx_matmul_lastdim(float *y, const float *x, const float *W, int rows, int fin, int fout) {
+void mdx_matmul_lastdim_ref(float *y, const float *x, const float *W, int rows, int fin, int fout) {
     for (int r = 0; r < rows; r++) {
         const float *xr = x + (long)r * fin;
         for (int j = 0; j < fout; j++) {
@@ -268,7 +272,12 @@ void mdx_matmul_lastdim(float *y, const float *x, const float *W, int rows, int 
     }
 }
 
+/* The elementwise kernels below have a single version: they are memory bound,
+ * so the only speed-up is spreading them over cores (pragmas are ignored
+ * without -fopenmp). */
+
 void mdx_batchnorm(float *x, const MdxBN *bn, float eps, int C, int hw) {
+#pragma omp parallel for schedule(static)
     for (int c = 0; c < C; c++) {
         float inv_std = 1.0f / sqrtf(bn->var[c] + eps);
         float *xc = x + (long)c * hw;
@@ -277,23 +286,33 @@ void mdx_batchnorm(float *x, const MdxBN *bn, float eps, int C, int hw) {
 }
 
 void mdx_relu(float *x, long n) {
+#pragma omp parallel for schedule(static)
     for (long i = 0; i < n; i++) x[i] = x[i] > 0.0f ? x[i] : 0.0f;
 }
 
 void mdx_add(float *y, const float *a, long n) {
+#pragma omp parallel for schedule(static)
     for (long i = 0; i < n; i++) y[i] += a[i];
 }
 
 void mdx_mul(float *y, const float *a, long n) {
+#pragma omp parallel for schedule(static)
     for (long i = 0; i < n; i++) y[i] *= a[i];
 }
 
 void mdx_transpose_last2(float *y, const float *x, int C, int H, int Wd) {
+    /* same assignments as the plain double loop over (i, j), visited in 32x32
+     * tiles so both the reads and the strided writes stay in cache */
+    enum { TB = 32 };
+#pragma omp parallel for collapse(2) schedule(static)
     for (int c = 0; c < C; c++) {
-        const float *xc = x + (long)c * H * Wd;
-        float *yc = y + (long)c * H * Wd;
-        for (int i = 0; i < H; i++)
-            for (int j = 0; j < Wd; j++) yc[(long)j * H + i] = xc[(long)i * Wd + j];
+        for (int i0 = 0; i0 < H; i0 += TB) {
+            const float *xc = x + (long)c * H * Wd;
+            float *yc = y + (long)c * H * Wd;
+            for (int j0 = 0; j0 < Wd; j0 += TB)
+                for (int i = i0; i < H && i < i0 + TB; i++)
+                    for (int j = j0; j < Wd && j < j0 + TB; j++) yc[(long)j * H + i] = xc[(long)i * Wd + j];
+        }
     }
 }
 
@@ -333,6 +352,39 @@ void mdx_state_free(MdxState *s) {
     memset(s, 0, sizeof(*s));
 }
 
+const char *const mdx_prof_names[MDX_PROF_N] = {"conv3x3", "tdf matmul", "down conv2x2", "up convT2x2",
+                                                 "conv1x1", "elementwise"};
+
+/* the kernels the forward pass calls: fast (kernels.c) or reference (above) */
+typedef struct {
+    void (*conv1x1)(float *, const float *, const float *, const float *, int, int, int, int);
+    void (*conv3x3)(float *, const float *, const float *, const float *, int, int, int, int);
+    void (*conv2x2_s2)(float *, const float *, const float *, const float *, int, int, int, int);
+    void (*convT2x2_s2)(float *, const float *, const float *, const float *, int, int, int, int);
+    void (*matmul_lastdim)(float *, const float *, const float *, int, int, int);
+} Kernels;
+
+static const Kernels FAST = {mdx_conv1x1, mdx_conv3x3, mdx_conv2x2_s2, mdx_convT2x2_s2, mdx_matmul_lastdim};
+static const Kernels REF = {mdx_conv1x1_ref, mdx_conv3x3_ref, mdx_conv2x2_s2_ref, mdx_convT2x2_s2_ref,
+                            mdx_matmul_lastdim_ref};
+
+static double now(void) {
+#ifdef _OPENMP
+    return omp_get_wtime();
+#else
+    return (double)clock() / CLOCKS_PER_SEC; /* single-threaded: CPU time == wall time */
+#endif
+}
+
+/* PROF(s, kind, statements...): run the statements, add their wall time to
+ * s->prof[kind]. Variadic so the statements may contain commas. */
+#define PROF(s, kind, ...)                      \
+    do {                                        \
+        double t0_ = now();                     \
+        __VA_ARGS__;                            \
+        (s)->prof[kind] += now() - t0_;         \
+    } while (0)
+
 static void tap(MdxState *s, const char *name, const float *t, int c, int h, int w) {
     if (s->tap) s->tap(s->tap_ctx, name, t, c, h, w);
 }
@@ -345,80 +397,78 @@ static void tap(MdxState *s, const char *name, const float *t, int c, int h, int
  *   h   = relu(BN(x @ tdf1))          [C][T][F/bn]
  *   out = relu(BN(h @ tdf2)) + x      [C][T][F]
  */
-static float *tfc_tdf(const MdxBlock *blk, const MdxConfig *cfg, float *x, float *tmp, float *h, int C, int T,
-                      int F) {
+static float *tfc_tdf(MdxState *s, const Kernels *k, const MdxBlock *blk, const MdxConfig *cfg, float *x,
+                      float *tmp, float *h, int C, int T, int F) {
     long n = (long)C * T * F;
     int Fh = F / (int)cfg->bn_factor;
     float *cur = x, *nxt = tmp, *t;
 
     for (uint32_t i = 0; i < cfg->n_tfc; i++) {
-        mdx_conv3x3(nxt, cur, blk->tfc[i].w, blk->tfc[i].b, C, C, T, F);
-        mdx_relu(nxt, n);
+        PROF(s, MDX_PROF_CONV3X3, k->conv3x3(nxt, cur, blk->tfc[i].w, blk->tfc[i].b, C, C, T, F));
+        PROF(s, MDX_PROF_ELEMWISE, mdx_relu(nxt, n));
         t = cur, cur = nxt, nxt = t;
     }
     /* cur = TFC output; nxt is free */
-    mdx_matmul_lastdim(h, cur, blk->tdf1, C * T, F, Fh);
-    mdx_batchnorm(h, &blk->tdf1_bn, cfg->bn_eps, C, T * Fh);
-    mdx_relu(h, (long)C * T * Fh);
+    PROF(s, MDX_PROF_TDF, k->matmul_lastdim(h, cur, blk->tdf1, C * T, F, Fh));
+    PROF(s, MDX_PROF_ELEMWISE, mdx_batchnorm(h, &blk->tdf1_bn, cfg->bn_eps, C, T * Fh);
+         mdx_relu(h, (long)C * T * Fh));
 
-    mdx_matmul_lastdim(nxt, h, blk->tdf2, C * T, Fh, F);
-    mdx_batchnorm(nxt, &blk->tdf2_bn, cfg->bn_eps, C, T * F);
-    mdx_relu(nxt, n);
-
-    mdx_add(nxt, cur, n); /* residual */
+    PROF(s, MDX_PROF_TDF, k->matmul_lastdim(nxt, h, blk->tdf2, C * T, Fh, F));
+    PROF(s, MDX_PROF_ELEMWISE, mdx_batchnorm(nxt, &blk->tdf2_bn, cfg->bn_eps, C, T * F); mdx_relu(nxt, n);
+         mdx_add(nxt, cur, n)); /* residual */
     return nxt;
 }
 
 void mdx_forward(const MdxModel *m, MdxState *s, const float *in, float *out) {
     const MdxConfig *cfg = &m->config;
     const MdxWeights *w = &m->weights;
+    const Kernels *k = s->reference ? &REF : &FAST;
     int n_scales = (int)cfg->n_scales, g = (int)cfg->growth;
     int C = g, T = s->T, F = (int)cfg->dim_f;
     float *cur, *other;
 
     /* first conv: [dim_c][F][T] -> [g][F][T], then to [g][T][F] so F is contiguous */
-    mdx_conv1x1(s->a, in, w->first.w, w->first.b, (int)cfg->dim_c, g, F, T);
-    mdx_relu(s->a, (long)g * F * T);
+    PROF(s, MDX_PROF_CONV1X1, k->conv1x1(s->a, in, w->first.w, w->first.b, (int)cfg->dim_c, g, F, T));
+    PROF(s, MDX_PROF_ELEMWISE, mdx_relu(s->a, (long)g * F * T));
     tap(s, "first", s->a, g, F, T);
-    mdx_transpose_last2(s->skip[0], s->a, g, F, T);
+    PROF(s, MDX_PROF_ELEMWISE, mdx_transpose_last2(s->skip[0], s->a, g, F, T));
 
     /* encoder: block i runs on skip[i] (its input was written there), so its
      * output stays in skip[i] for the decoder; downsample into the next level */
     char name[16];
     for (int i = 0; i < n_scales; i++) {
-        cur = tfc_tdf(&w->enc[i], cfg, s->skip[i], s->a, s->h, C, T, F);
+        cur = tfc_tdf(s, k, &w->enc[i], cfg, s->skip[i], s->a, s->h, C, T, F);
         if (cur != s->skip[i]) memcpy(s->skip[i], cur, (size_t)C * T * F * sizeof(float)); /* even n_tfc */
         snprintf(name, sizeof(name), "enc%d", i);
         tap(s, name, s->skip[i], C, T, F);
 
         float *dst = i + 1 < n_scales ? s->skip[i + 1] : s->a;
-        mdx_conv2x2_s2(dst, s->skip[i], w->down[i].w, w->down[i].b, C, C + g, T, F);
+        PROF(s, MDX_PROF_DOWN, k->conv2x2_s2(dst, s->skip[i], w->down[i].w, w->down[i].b, C, C + g, T, F));
         C += g, T /= 2, F /= 2;
-        mdx_relu(dst, (long)C * T * F);
+        PROF(s, MDX_PROF_ELEMWISE, mdx_relu(dst, (long)C * T * F));
     }
 
     /* bottleneck */
-    cur = tfc_tdf(&w->mid, cfg, s->a, s->b, s->h, C, T, F);
+    cur = tfc_tdf(s, k, &w->mid, cfg, s->a, s->b, s->h, C, T, F);
     tap(s, "mid", cur, C, T, F);
 
     /* decoder */
     for (int i = 0; i < n_scales; i++) {
         int lvl = n_scales - 1 - i;
         other = cur == s->a ? s->b : s->a;
-        mdx_convT2x2_s2(other, cur, w->up[i].w, w->up[i].b, C, C - g, T, F);
+        PROF(s, MDX_PROF_UP, k->convT2x2_s2(other, cur, w->up[i].w, w->up[i].b, C, C - g, T, F));
         C -= g, T *= 2, F *= 2;
         long n = (long)C * T * F;
-        mdx_batchnorm(other, &w->up_bn[i], cfg->bn_eps, C, T * F);
-        mdx_relu(other, n);
-        mdx_mul(other, s->skip[lvl], n); /* multiplicative skip connection */
-        cur = tfc_tdf(&w->dec[i], cfg, other, cur, s->h, C, T, F);
+        PROF(s, MDX_PROF_ELEMWISE, mdx_batchnorm(other, &w->up_bn[i], cfg->bn_eps, C, T * F); mdx_relu(other, n);
+             mdx_mul(other, s->skip[lvl], n)); /* multiplicative skip connection */
+        cur = tfc_tdf(s, k, &w->dec[i], cfg, other, cur, s->h, C, T, F);
         snprintf(name, sizeof(name), "dec%d", i);
         tap(s, name, cur, C, T, F);
     }
 
     /* back to [g][F][T], final 1x1 conv to dim_c channels, no activation */
     other = cur == s->a ? s->b : s->a;
-    mdx_transpose_last2(other, cur, C, T, F);
-    mdx_conv1x1(out, other, w->final.w, w->final.b, g, (int)cfg->dim_c, F, T);
+    PROF(s, MDX_PROF_ELEMWISE, mdx_transpose_last2(other, cur, C, T, F));
+    PROF(s, MDX_PROF_CONV1X1, k->conv1x1(out, other, w->final.w, w->final.b, g, (int)cfg->dim_c, F, T));
     tap(s, "output", out, (int)cfg->dim_c, F, T);
 }

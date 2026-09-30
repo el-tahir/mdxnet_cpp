@@ -28,9 +28,22 @@
 #include "stft.h"
 #include "wav.h"
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 #define N_FFT 4096
 #define HOP 1024 /* 75% overlap */
 #define PAD (N_FFT / 2)
+
+/* wall-clock seconds (clock() would add up the CPU time of all OpenMP threads) */
+static double now(void) {
+#ifdef _OPENMP
+    return omp_get_wtime();
+#else
+    return (double)clock() / CLOCKS_PER_SEC;
+#endif
+}
 
 /* ------------------------------------------------------------------------- */
 /* ffmpeg: the only external program, run once before anything else */
@@ -163,7 +176,7 @@ static int run_separation(const char *input_path, const char *output_path, const
     for (long c = 0; c < n_chunks; c++) {
         long first = c * T;
         int valid = (int)(n_frames - first < T ? n_frames - first : T);
-        clock_t t0 = clock();
+        double t0 = now();
 
         /* STFT of this chunk's frames */
         for (int k = 0; k < valid; k++) {
@@ -185,7 +198,7 @@ static int run_separation(const char *input_path, const char *output_path, const
             istft_frame(&plan, window, rfr + (long)k * N_FFT, scratch, frame_out);
             for (int i = 0; i < N_FFT; i++) rrec[off + i] += frame_out[i];
         }
-        printf("  chunk %ld/%ld (%d frames): %.1fs\n", c + 1, n_chunks, valid, (double)(clock() - t0) / CLOCKS_PER_SEC);
+        printf("  chunk %ld/%ld (%d frames): %.1fs\n", c + 1, n_chunks, valid, now() - t0);
         fflush(stdout);
     }
 
