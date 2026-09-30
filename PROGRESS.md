@@ -23,7 +23,7 @@ Branch: `claude/chat-session-5b6r4k`
 | M6 | `fft.c`, `stft.c` + tests | **done** | `b2d71de` |
 | M7 | `wav.c`, `main.c`: full C pipeline, SNR > 60 dB vs C++ `separator` | **done** | `5274de0`, `cfba5ef` |
 | M8 | `plain_c/Makefile` `test` target complete; README section | **done** | `2ff2fd2` |
-| M9 | performance | **done** (first pass) | M9_COMMIT |
+| M9 | performance | **done** (first pass) | `3596990` |
 
 ### Verified results so far
 - M0: reference vs ORT on seeded input `[1,4,2048,256]` (`np.random.default_rng(0)`, ×0.5):
