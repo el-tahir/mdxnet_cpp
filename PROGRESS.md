@@ -20,8 +20,8 @@ Branch: `claude/chat-session-5b6r4k`
 | M3 | first_conv + transpose + enc0 TFC_TDF; taps `447`, `466` match | **done** | `7cd6f52` |
 | M4 | full encoder + bottleneck; taps through `571` match | **done** (with M3) | `7cd6f52` |
 | M5 | decoder + final conv; `output` matches < 1e-4 rel | **done** (with M3) | `7cd6f52` |
-| M6 | `fft.c`, `stft.c` + tests | next | |
-| M7 | `wav.c`, `main.c`: full C pipeline, SNR > 60 dB vs C++ `separator` | todo | |
+| M6 | `fft.c`, `stft.c` + tests | **done** | M6_COMMIT |
+| M7 | `wav.c`, `main.c`: full C pipeline, SNR > 60 dB vs C++ `separator` | next | |
 | M8 | `plain_c/Makefile` `test` target complete; README section | todo | |
 | M9 | performance | todo | |
 
@@ -43,6 +43,14 @@ Branch: `claude/chat-session-5b6r4k`
   Full size T=256 (`python3 tools/dump_acts.py ../models/UVR_MDXNET_KARA_2.onnx 256`, 450 MB dump):
   all 13 taps match, worst 2.3e-6 inside the net, 4.8e-6 at `output`; 287 s naive.
   T=32 run clean under ASan/UBSan (no errors, no leaks).
+- M6: `test_fft`: forward, inverse and inverse∘forward vs a double-precision
+  naive DFT for n = 1..4096, worst rel err 4.0e-7; non-powers of two rejected.
+  `test_stft`: Hann periodic with Σw² = 1.5 at hop n/4; reflect pad matches
+  `DSPCore::pad_audio`; full pad → STFT → ISTFT → overlap-add → crop → ÷1.5 on
+  3 s of noise equals `x·S(p)/1.5` at every sample (138 dB SNR) and `x` in the
+  interior; pack/unpack layout and dropped bins exact. One-off check against the
+  real C++ `DSPCore` + kiss_fft (harness compiled in scratch, not committed):
+  STFT frame rel err 4.1e-8, ISTFT 1.5e-7. Both tests clean under ASan/UBSan.
 
 ---
 
@@ -97,6 +105,9 @@ python3 tools/reference.py ../models/UVR_MDXNET_KARA_2.onnx   # numpy vs ORT (~3
 | `tools/gen_kernel_tests.py` | Random small cases per kernel (incl. 1-sized, odd, cin≠cout, H≠W) → `tests/data/kernels.bin` (committed, 30 KB) using `reference.py` for expected outputs. Record format documented in its docstring. |
 | `tests/test_kernels.c` | Runs each C kernel on each case; pass if max\|diff\|/max\|ref\| < 1e-5. |
 | `mdx.c` forward | `MdxState` (`mdx_state_init(s, cfg, T)`): buffers `a`, `b` (level-0 size), `h` (TDF hidden), `skip[i]`. `tfc_tdf()` ping-pongs between two buffers and **returns the one holding its output**. Encoder blocks run in place on `skip[i]` (downsample writes straight into `skip[i+1]`); bottleneck/decoder alternate `a`/`b`. Optional tap callback `s->tap(ctx, name, t, c, h, w)` after every block (names: `first`, `enc0..4`, `mid`, `dec0..4`, `output`). At T=256 the buffers total ~375 MB. |
+| `fft.c` / `fft.h` | `Complex {re, im}`, `FFTPlan` (`fft_init(p, n)`, power of 2 only): iterative radix-2 DIT, bit-reversal table + cos/sin twiddle tables (computed in double, stored float). `fft_forward` (e^{-i}), `fft_inverse` (e^{+i}, **no 1/n**, like kiss_fft). |
+| `stft.c` / `stft.h` | `stft_hann` (periodic, double precision like the C++), `stft_reflect_pad` (edge sample repeated, like `DSPCore::pad_audio`), `stft_frame`, `istft_frame` (÷n and window applied here), `pack_chunk` / `unpack_chunk` (frames ↔ `[4][F][T]` model tensor; bins 0–2 zeroed on pack; unpack zeroes bins F..n/2 and mirrors conjugates). Framing / overlap-add / ÷1.5 live in the caller (see `tests/test_stft.c` §3 for the exact loop `main.c` needs). |
+| `tests/test_fft.c`, `tests/test_stft.c` | See M6 results above. No data files, no Python. |
 | `tools/dump_acts.py` | Runs ORT with relaxed T (default 32) and the 13 taps as extra outputs; writes `tests/data/acts_T<T>/{input,<tap>}.bin` + `taps.txt` (57 MB at T=32, gitignored). |
 | `tests/test_forward.c` | Runs `mdx_forward` on the dumped input; the tap callback compares each block's output to ORT as it's produced (< 1e-4 rel), printing elapsed time. T is read from the dump. |
 | `Makefile` | `make` builds tests; `make test` creates `kara.bin` and `acts_T32/` if missing (needs Python for those two), then runs all three tests. Flags: `-O2 -std=c99 -Wall -Wextra -pedantic`. |
@@ -121,24 +132,33 @@ python3 tools/reference.py ../models/UVR_MDXNET_KARA_2.onnx   # numpy vs ORT (~3
 - Don't size things by walking a NULL pointer (UB) — `map_weights` uses offsets.
 - Manifest sums must be printed with `%.17g`; 9 digits is too coarse for the
   1e-12 relative tolerance in `test_load.c`.
+- C++ Hann is `0.5f * (1.0f - std::cos(2.0f * M_PI * n / n_fft))`: `M_PI` is a
+  double, so it's evaluated in **double** and rounded once. Match that, not a
+  float `cosf` version.
+- The C++ framing attenuates the first/last ~1024 output samples (gain down to
+  0.63, fewer overlapping windows than the interior, fixed ÷1.5). That is
+  reference behaviour — reproduce it for parity, don't "fix" it yet (PLAN.md §5 quirks).
 
 ---
 
-## Next up: M6 (FFT + STFT in C)
+## Next up: M7 (full separator in C, parity with the C++ build)
 
-Exact behaviour to reproduce is in PLAN.md §5 (table) — read the C++ sources
-`src/DSPCore.cpp` and `src/utils.cpp` too; they are the reference.
-
-1. `plain_c/fft.c/.h`: in-place iterative radix-2 complex FFT for n = power of 2
-   (bit-reversal permutation, then log2(n) butterfly stages; twiddles
-   `e^{-2πik/n}` precomputed once). Inverse = `+` sign, **no 1/n scaling**
-   (matches kiss_fft; the `/n_fft` is applied in ISTFT).
-2. `plain_c/stft.c/.h`: periodic Hann window, reflect pad by n_fft/2, STFT frame
-   (window then FFT), ISTFT frame (IFFT, real part / n_fft, times window),
-   `pack_chunk` / `unpack_chunk` between frames and the model's `[4][2048][256]`
-   tensor — note bins 0–2 are zeroed on pack, and unpack rebuilds bins
-   2049..4095 as conjugates of 1..2047 with DC imag = 0 and Nyquist = 0.
-3. Tests: `tests/test_fft.c` vs a naive O(n²) DFT computed in double (rel err
-   < 1e-4 at n = 4096, plus small n); `tests/test_stft.c` pad → STFT → ISTFT →
-   overlap-add → crop → /1.5 reproduces a random signal (> 90 dB SNR).
-   Optionally also check STFT frames against the C++ `DSPCore` output.
+1. `plain_c/wav.c/.h`: port `include/WAVHeader.h` exactly — packed 44-byte
+   header read in one go (assumes no extra chunks: fine because ffmpeg output is
+   `-fflags +bitexact -map_metadata -1`), 44.1 kHz only, PCM s16 (`/32768`) or
+   float32, mono duplicated to stereo; writer emits float32 stereo, 44-byte header.
+   Read/write header fields byte by byte (little-endian) instead of `#pragma pack`.
+2. `plain_c/main.c`: port `src/main.cpp` step for step (PLAN.md §5 table):
+   ffmpeg once via `system()` into a temp file (fallback to the original file),
+   read, deinterleave, reflect pad, frames every 1024, chunks of 256 frames →
+   `pack_chunk` → `mdx_forward` (T=256) → `unpack_chunk` (only the valid frames),
+   ISTFT + overlap-add, crop pad, ÷1.5, interleave, noise gate (−40 dB, window
+   2048, same O(N·window) loop), write, remove temp file.
+   Model path: `models/kara.bin` by default (C++ uses `models/UVR_MDXNET_KARA_2.onnx`).
+3. Parity: build the C++ reference (`make` at repo root; CMake downloads ORT
+   1.16.3 from GitHub — check the network allows it) and run both separators on
+   the same short clip. No audio is in the repo: use any short music clip
+   (e.g. generate one with ffmpeg, or a public-domain file). Keep it short —
+   the naive C forward is ~287 s per 256-frame chunk (~6 s of audio), so a 10 s
+   clip ≈ 2 chunks ≈ 10 min. Add a small compare tool (C or Python) that prints
+   the SNR between the two output WAVs; target > 60 dB.

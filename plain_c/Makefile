@@ -5,10 +5,16 @@ LDLIBS = -lm
 ONNX = ../models/UVR_MDXNET_KARA_2.onnx
 MODEL = models/kara.bin
 
-TESTS = test_load test_kernels test_forward
+TESTS = test_fft test_stft test_load test_kernels test_forward
 ACTS = tests/data/acts_T32
 
 all: $(TESTS)
+
+test_fft: tests/test_fft.c fft.c fft.h
+	$(CC) $(CFLAGS) -o $@ tests/test_fft.c fft.c $(LDLIBS)
+
+test_stft: tests/test_stft.c stft.c stft.h fft.c fft.h
+	$(CC) $(CFLAGS) -o $@ tests/test_stft.c stft.c fft.c $(LDLIBS)
 
 test_load: tests/test_load.c mdx.c mdx.h
 	$(CC) $(CFLAGS) -o $@ tests/test_load.c mdx.c $(LDLIBS)
@@ -30,6 +36,8 @@ $(MODEL): $(ONNX) tools/export.py
 	python3 tools/export.py $(ONNX) $(MODEL)
 
 test: $(TESTS) $(MODEL) $(ACTS)/taps.txt
+	./test_fft
+	./test_stft
 	./test_load $(MODEL)
 	./test_kernels tests/data/kernels.bin
 	./test_forward $(MODEL) $(ACTS)

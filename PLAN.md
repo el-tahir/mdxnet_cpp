@@ -184,7 +184,10 @@ against a naive O(N²) DFT in double precision.
 **Quirks carried over as-is for parity** (fix after parity is proven, each as its
 own change): the WAV reader assumes a bare 44-byte header (works because ffmpeg
 is run with `-fflags +bitexact -map_metadata -1`); the noise gate is
-O(N·4096); the whole song's STFT is held in memory.
+O(N·4096); the whole song's STFT is held in memory; framing starts at offset 0
+of the padded signal, so the first and last ~1024 output samples are covered by
+fewer windows than the interior and come out attenuated (gain down to ~0.63)
+after the fixed ÷1.5 — `tests/test_stft.c` checks this exact gain.
 
 ---
 
