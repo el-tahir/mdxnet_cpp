@@ -16,7 +16,7 @@ Branch: `claude/chat-session-5b6r4k`
 | — | Trace ONNX graph, write `PLAN.md` | done | `3d75fbd` |
 | M0 | `plain_c/tools/reference.py` numpy forward pass matches ORT | **done** | `4b2681f` |
 | M1 | `tools/export.py` → `kara.bin`; `mdx_load` in C; `tests/test_load.c` | **done** | `8452b6d` |
-| M2 | 9 kernels (naive loops) + unit tests vs numpy | **done** | M2_COMMIT |
+| M2 | 9 kernels (naive loops) + unit tests vs numpy | **done** | `f6f7190` |
 | M3 | first_conv + transpose + enc0 TFC_TDF; taps `447`, `466` match | next | |
 | M4 | full encoder + bottleneck; taps through `571` match | todo | |
 | M5 | decoder + final conv; `output` matches < 1e-4 rel | todo | |
