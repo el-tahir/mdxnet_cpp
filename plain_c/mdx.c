@@ -1,5 +1,6 @@
 #include "mdx.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -172,4 +173,126 @@ int mdx_load(MdxModel *m, const char *path) {
 void mdx_free(MdxModel *m) {
     free(m->data);
     memset(m, 0, sizeof(*m));
+}
+
+/* ------------------------------------------------------------------------- */
+/* kernels
+ *
+ * Deliberately naive: the loops follow the formulas in mdx.h one to one, output
+ * element by output element. Speed comes later (PLAN.md M9) without changing
+ * these reference versions.
+ */
+
+void mdx_conv1x1(float *y, const float *x, const float *W, const float *b, int cin, int cout, int H, int Wd) {
+    long hw = (long)H * Wd;
+    for (int o = 0; o < cout; o++) {
+        for (long p = 0; p < hw; p++) {
+            float acc = b[o];
+            for (int i = 0; i < cin; i++) acc += W[(long)o * cin + i] * x[i * hw + p];
+            y[o * hw + p] = acc;
+        }
+    }
+}
+
+void mdx_conv3x3(float *y, const float *x, const float *W, const float *b, int cin, int cout, int H, int Wd) {
+    long hw = (long)H * Wd;
+    for (int o = 0; o < cout; o++) {
+        for (int h = 0; h < H; h++) {
+            for (int w = 0; w < Wd; w++) {
+                float acc = b[o];
+                for (int i = 0; i < cin; i++) {
+                    const float *wk = W + ((long)o * cin + i) * 9; /* W[o][i][.][.] */
+                    const float *xi = x + i * hw;
+                    for (int ky = 0; ky < 3; ky++) {
+                        int hh = h + ky - 1;
+                        if (hh < 0 || hh >= H) continue; /* zero padding */
+                        for (int kx = 0; kx < 3; kx++) {
+                            int ww = w + kx - 1;
+                            if (ww < 0 || ww >= Wd) continue;
+                            acc += wk[ky * 3 + kx] * xi[(long)hh * Wd + ww];
+                        }
+                    }
+                }
+                y[o * hw + (long)h * Wd + w] = acc;
+            }
+        }
+    }
+}
+
+void mdx_conv2x2_s2(float *y, const float *x, const float *W, const float *b, int cin, int cout, int H, int Wd) {
+    int Ho = H / 2, Wo = Wd / 2;
+    long hw = (long)H * Wd;
+    for (int o = 0; o < cout; o++) {
+        for (int h = 0; h < Ho; h++) {
+            for (int w = 0; w < Wo; w++) {
+                float acc = b[o];
+                for (int i = 0; i < cin; i++) {
+                    const float *wk = W + ((long)o * cin + i) * 4; /* W[o][i][.][.] */
+                    const float *xi = x + i * hw;
+                    for (int ky = 0; ky < 2; ky++)
+                        for (int kx = 0; kx < 2; kx++)
+                            acc += wk[ky * 2 + kx] * xi[(long)(2 * h + ky) * Wd + (2 * w + kx)];
+                }
+                y[((long)o * Ho + h) * Wo + w] = acc;
+            }
+        }
+    }
+}
+
+void mdx_convT2x2_s2(float *y, const float *x, const float *W, const float *b, int cin, int cout, int H, int Wd) {
+    /* stride == kernel size, so every output pixel (2h+ky, 2w+kx) receives exactly
+     * one kernel tap (ky,kx) from exactly one input pixel (h,w) per input channel */
+    int Ho = 2 * H, Wo = 2 * Wd;
+    long hw = (long)H * Wd;
+    for (int o = 0; o < cout; o++) {
+        for (int yy = 0; yy < Ho; yy++) {
+            for (int xx = 0; xx < Wo; xx++) {
+                int h = yy / 2, ky = yy % 2, w = xx / 2, kx = xx % 2;
+                float acc = b[o];
+                for (int i = 0; i < cin; i++)
+                    acc += W[(((long)i * cout + o) * 2 + ky) * 2 + kx] * x[i * hw + (long)h * Wd + w]; /* W[i][o][ky][kx] */
+                y[((long)o * Ho + yy) * Wo + xx] = acc;
+            }
+        }
+    }
+}
+
+void mdx_matmul_lastdim(float *y, const float *x, const float *W, int rows, int fin, int fout) {
+    for (int r = 0; r < rows; r++) {
+        const float *xr = x + (long)r * fin;
+        for (int j = 0; j < fout; j++) {
+            float acc = 0.0f;
+            for (int f = 0; f < fin; f++) acc += xr[f] * W[(long)f * fout + j];
+            y[(long)r * fout + j] = acc;
+        }
+    }
+}
+
+void mdx_batchnorm(float *x, const MdxBN *bn, float eps, int C, int hw) {
+    for (int c = 0; c < C; c++) {
+        float inv_std = 1.0f / sqrtf(bn->var[c] + eps);
+        float *xc = x + (long)c * hw;
+        for (int i = 0; i < hw; i++) xc[i] = (xc[i] - bn->mean[c]) * inv_std * bn->scale[c] + bn->bias[c];
+    }
+}
+
+void mdx_relu(float *x, long n) {
+    for (long i = 0; i < n; i++) x[i] = x[i] > 0.0f ? x[i] : 0.0f;
+}
+
+void mdx_add(float *y, const float *a, long n) {
+    for (long i = 0; i < n; i++) y[i] += a[i];
+}
+
+void mdx_mul(float *y, const float *a, long n) {
+    for (long i = 0; i < n; i++) y[i] *= a[i];
+}
+
+void mdx_transpose_last2(float *y, const float *x, int C, int H, int Wd) {
+    for (int c = 0; c < C; c++) {
+        const float *xc = x + (long)c * H * Wd;
+        float *yc = y + (long)c * H * Wd;
+        for (int i = 0; i < H; i++)
+            for (int j = 0; j < Wd; j++) yc[(long)j * H + i] = xc[(long)i * Wd + j];
+    }
 }

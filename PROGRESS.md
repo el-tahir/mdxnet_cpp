@@ -16,8 +16,8 @@ Branch: `claude/chat-session-5b6r4k`
 | — | Trace ONNX graph, write `PLAN.md` | done | `3d75fbd` |
 | M0 | `plain_c/tools/reference.py` numpy forward pass matches ORT | **done** | `4b2681f` |
 | M1 | `tools/export.py` → `kara.bin`; `mdx_load` in C; `tests/test_load.c` | **done** | `8452b6d` |
-| M2 | 9 kernels (naive loops) + unit tests vs numpy | next | |
-| M3 | first_conv + transpose + enc0 TFC_TDF; taps `447`, `466` match | todo | |
+| M2 | 9 kernels (naive loops) + unit tests vs numpy | **done** | M2_COMMIT |
+| M3 | first_conv + transpose + enc0 TFC_TDF; taps `447`, `466` match | next | |
 | M4 | full encoder + bottleneck; taps through `571` match | todo | |
 | M5 | decoder + final conv; `output` matches < 1e-4 rel | todo | |
 | M6 | `fft.c`, `stft.c` + tests | todo | |
@@ -31,6 +31,10 @@ Branch: `claude/chat-session-5b6r4k`
 - M1: `make test` → 220/220 tensors match the manifest by name; truncated / +1 float /
   header-only / empty files all rejected. Clean under `-fsanitize=address,undefined`.
   `kara.bin` = 52,764,496 bytes (64 header + 13,191,108 floats).
+- M2: `make test` → 36/36 kernel cases pass, worst rel err 2.8e-7 (tolerance 1e-5).
+  Mutation check: flipping the 3×3 kernel, or indexing ConvTranspose weights as
+  `[o][i]` instead of `[i][o]`, makes the relevant cases fail (so the tests have teeth).
+  Clean under ASan/UBSan.
 
 ---
 
@@ -81,6 +85,9 @@ python3 tools/reference.py ../models/UVR_MDXNET_KARA_2.onnx   # numpy vs ORT (~3
 | `mdx.h` | `MdxConfig` (header), `MdxConv`/`MdxBN`/`MdxBlock`/`MdxWeights` (pointers into one float buffer), `mdx_load`/`mdx_free`. |
 | `mdx.c` | Loader: `map_weights()` walks the same order as `tensor_list()`; with `data == NULL` it only counts, used to require an exact file size before reading. |
 | `tests/test_load.c` | Walks `MdxWeights` by field name, compares count / first / mid / last / sum to the manifest. |
+| `mdx.c` kernels | `mdx_conv1x1`, `mdx_conv3x3`, `mdx_conv2x2_s2`, `mdx_convT2x2_s2`, `mdx_matmul_lastdim`, `mdx_batchnorm` (in place), `mdx_relu`/`mdx_add`/`mdx_mul` (in place), `mdx_transpose_last2`. Declared in `mdx.h` with their formulas. Naive: loops follow the formula one output element at a time. Sizes passed as `int` (largest tensor 25.2M elements fits), offsets computed in `long`. |
+| `tools/gen_kernel_tests.py` | Random small cases per kernel (incl. 1-sized, odd, cin≠cout, H≠W) → `tests/data/kernels.bin` (committed, 30 KB) using `reference.py` for expected outputs. Record format documented in its docstring. |
+| `tests/test_kernels.c` | Runs each C kernel on each case; pass if max\|diff\|/max\|ref\| < 1e-5. |
 | `Makefile` | `make` builds tests; `make test` builds `kara.bin` if missing and runs tests. Flags: `-O2 -std=c99 -Wall -Wextra -pedantic`. |
 
 ---
@@ -105,15 +112,16 @@ python3 tools/reference.py ../models/UVR_MDXNET_KARA_2.onnx   # numpy vs ORT (~3
 
 ---
 
-## Next up: M2 (kernels)
+## Next up: M3 (first_conv + enc0 block vs ORT taps)
 
-Add to `mdx.c` (static or exposed via a test-only header) naive-loop kernels for
-the 9 ops in PLAN.md §2: `conv1x1`, `conv3x3_p1`, `conv2x2_s2`, `convT2x2_s2`,
-`matmul_lastdim`, `batchnorm`, `relu`, `add`/`mul`, `transpose_last2`.
-Tensors are `[C][H][W]` row-major float arrays, batch 1.
-
-Test plan: a Python tool generates small random inputs/weights per op (e.g.
-C=3..8, H,W = 4..10, even sizes for the stride-2 ops), runs the matching
-`reference.py` function, writes inputs + expected outputs as raw float32;
-`tests/test_kernels.c` runs each C kernel and requires max rel err < 1e-5.
-Wire into `make test`.
+1. `tools/dump_acts.py`: load the ONNX model, relax the input's T dim so a small
+   T works (e.g. T=32 — must be divisible by 2^n_scales = 32), add the tap tensors
+   (PLAN.md §7) as extra graph outputs, run ORT on a seeded input, write input +
+   each tap as raw float32 to `tests/data/acts_T32/` (gitignored — too big to
+   commit: tap `466` alone at T=32 is 48·32·2048·4 B = 12.6 MB).
+   Check first that ORT accepts the relaxed dim (the TDF MatMuls only fix F).
+2. `mdx.c`: `MdxState` with the buffers from PLAN.md §6 sized from the config and
+   a T argument; `mdx_forward()` built up block by block, with a debug hook
+   (callback or `tap` pointers) so the test can compare intermediate tensors.
+3. `tests/test_forward.c`: compare taps `447` and `466` (< 1e-4 rel).
+   Note the layouts: `447` is `[48][F][T]` (before the transpose), `466` is `[48][T][F]`.

@@ -59,4 +59,43 @@ typedef struct {
 int mdx_load(MdxModel *m, const char *path);
 void mdx_free(MdxModel *m);
 
+/* ------------------------------------------------------------------------- */
+/* kernels
+ *
+ * Every tensor is a dense row-major float array [C][H][W] (batch 1).
+ * y is the output, x the input; y and x never alias unless noted "in place".
+ * Formulas are in PLAN.md section 2 and in the docstrings of tools/reference.py.
+ */
+
+/* y[o,h,w] = b[o] + sum_i W[o,i] x[i,h,w]                        W [cout][cin][1][1] */
+void mdx_conv1x1(float *y, const float *x, const float *W, const float *b, int cin, int cout, int H, int Wd);
+
+/* y[o,h,w] = b[o] + sum_i,ky,kx W[o,i,ky,kx] x[i,h+ky-1,w+kx-1], zero outside   W [cout][cin][3][3] */
+void mdx_conv3x3(float *y, const float *x, const float *W, const float *b, int cin, int cout, int H, int Wd);
+
+/* y[o,h,w] = b[o] + sum_i,ky,kx W[o,i,ky,kx] x[i,2h+ky,2w+kx]; x is [cin][H][Wd], y [cout][H/2][Wd/2]   W [cout][cin][2][2] */
+void mdx_conv2x2_s2(float *y, const float *x, const float *W, const float *b, int cin, int cout, int H, int Wd);
+
+/* y[o,2h+ky,2w+kx] = b[o] + sum_i W[i,o,ky,kx] x[i,h,w]; x is [cin][H][Wd], y [cout][2H][2Wd]   W [cin][cout][2][2] */
+void mdx_convT2x2_s2(float *y, const float *x, const float *W, const float *b, int cin, int cout, int H, int Wd);
+
+/* y[r,j] = sum_f x[r,f] W[f,j]; x is [rows][fin], y [rows][fout]   W [fin][fout]
+ * (rows = C*T: the Linear acts on the last axis only) */
+void mdx_matmul_lastdim(float *y, const float *x, const float *W, int rows, int fin, int fout);
+
+/* in place: x[c,i] = (x[c,i] - mean[c]) / sqrt(var[c] + eps) * scale[c] + bias[c], i over hw */
+void mdx_batchnorm(float *x, const MdxBN *bn, float eps, int C, int hw);
+
+/* in place: x = max(x, 0) */
+void mdx_relu(float *x, long n);
+
+/* in place: y += a */
+void mdx_add(float *y, const float *a, long n);
+
+/* in place: y *= a */
+void mdx_mul(float *y, const float *a, long n);
+
+/* y[c,j,i] = x[c,i,j]; x is [C][H][Wd], y [C][Wd][H] */
+void mdx_transpose_last2(float *y, const float *x, int C, int H, int Wd);
+
 #endif

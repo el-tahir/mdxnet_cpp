@@ -37,3 +37,4 @@ onnxruntime/
 # plain_c build outputs
 plain_c/test_*
 !plain_c/tests/
+__pycache__/
